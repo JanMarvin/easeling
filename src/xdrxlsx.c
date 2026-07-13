@@ -282,6 +282,8 @@ static void Xdr_Polygon(int n, double *x, double *y, const pGEcontext gc, pDevDe
   fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
 }
 
+#define TEXT_Y_NUDGE 1.5
+
 static void Xdr_TextImpl(double x, double y, const char *str, double rot,
                          double hadj, const pGEcontext gc, pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
@@ -292,15 +294,22 @@ static void Xdr_TextImpl(double x, double y, const char *str, double rot,
 
   double bx0, by0, bx1, by1;
   if (fabs(rot) > 1e-4) {
-    double rad = rot * M_PI / 180.0;
-    double cos_r = cos(rad);
-    double sin_r = sin(rad);
-    double rx = x - (w / 2.0) * (1.0 - cos_r) + (h / 2.0) * sin_r;
-    double ry = y - (h / 2.0) * (1.0 + cos_r) - (w / 2.0) * sin_r;
-    bx0 = rx; by0 = ry; bx1 = rx + w; by1 = ry + h;
+    /* Rotate around the box's own center (matching how the bodyPr rot
+     attribute rotates a shape), solving for the center position such
+     that the anchor point (x,y) lands correctly post-rotation. */
+    double theta = -rot * M_PI / 180.0;
+    double cos_r = cos(theta);
+    double sin_r = sin(theta);
+    double ox = hadj * w - w / 2.0;   /* local anchor x, relative to box center */
+    double oy = h / 2.0;              /* local anchor y (baseline), relative to center */
+    double rot_ox = ox * cos_r - oy * sin_r;
+    double rot_oy = ox * sin_r + oy * cos_r;
+    double cx = x - rot_ox;
+    double cy = y - rot_oy;
+    bx0 = cx - w / 2.0; by0 = cy - h / 2.0; bx1 = bx0 + w; by1 = by0 + h;
   } else {
     double base_x = x - hadj * w;
-    bx0 = base_x; by0 = y - h; bx1 = base_x + w; by1 = y;
+    bx0 = base_x; by0 = y - h + TEXT_Y_NUDGE; bx1 = base_x + w; by1 = y + TEXT_Y_NUDGE;
   }
   if (fully_outside_clip(d, bx0, by0, bx1, by1)) return;
 
@@ -314,19 +323,22 @@ static void Xdr_TextImpl(double x, double y, const char *str, double rot,
 
   if (fabs(rot) > 1e-4) {
     int ooxml_rot = (int) (-rot * 60000.0);
-    fprintf(d->out, "<xdr:txBody><a:bodyPr rot=\"%d\" vert=\"horz\" anchor=\"ctr\" wrap=\"none\"/>", ooxml_rot);
+    fprintf(d->out, "<xdr:txBody><a:bodyPr rot=\"%d\" vert=\"horz\" anchor=\"ctr\" wrap=\"none\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/>", ooxml_rot);
   } else {
-    fprintf(d->out, "<xdr:txBody><a:bodyPr anchor=\"b\" wrap=\"none\"/>");
+    fprintf(d->out, "<xdr:txBody><a:bodyPr anchor=\"b\" wrap=\"none\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/>");
   }
 
   int alpha = (int)(R_ALPHA(gc->col) / 255.0 * 100000.0 + 0.5);
   const char *b_attr = (gc->fontface == 2 || gc->fontface == 4) ? " b=\"1\"" : "";
   const char *i_attr = (gc->fontface == 3 || gc->fontface == 4) ? " i=\"1\"" : "";
 
+  const char *algn = (hadj < 0.25) ? "l" : (hadj > 0.75) ? "r" : "ctr";
+
   fprintf(d->out,
-          "<a:p><a:pPr algn=\"ctr\"/><a:r>"
+          "<a:p><a:pPr algn=\"%s\"/><a:r>"
           "<a:rPr sz=\"%d\"%s%s><a:solidFill><a:srgbClr val=\"%06X\"><a:alpha val=\"%d\"/></a:srgbClr></a:solidFill></a:rPr>"
           "<a:t>%s</a:t></a:r></a:p></xdr:txBody></xdr:sp>\n",
+          algn,                           // %s (algn)
           (int)(gc->cex * gc->ps * 100), // %d (sz)
           b_attr,                        // %s (b_attr)
           i_attr,                        // %s (i_attr)
