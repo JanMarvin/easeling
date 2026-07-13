@@ -1,0 +1,498 @@
+#ifdef __clang__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wc23-extensions"
+#endif
+#include <R.h>
+#include <Rinternals.h>
+#include <R_ext/GraphicsEngine.h>
+#include <R_ext/GraphicsDevice.h>
+#include <R_ext/Rdynload.h>
+#ifdef __clang__
+#pragma GCC diagnostic pop
+#endif
+
+#include <stdio.h>
+#include <string.h>
+#include <math.h>
+
+#define PT_TO_EMU 12700.0
+
+typedef struct {
+  FILE *out;
+  int shape_id;
+  double clip_x0, clip_y0, clip_x1, clip_y1;
+} xdrDesc;
+
+static void esc_xml(const char *in, char *out, size_t outlen) {
+  size_t j = 0;
+  for (size_t i = 0; in[i] != '\0' && j + 6 < outlen; i++) {
+    switch (in[i]) {
+    case '&':  memcpy(out + j, "&amp;",  5); j += 5; break;
+    case '<':  memcpy(out + j, "&lt;",   4); j += 4; break;
+    case '>':  memcpy(out + j, "&gt;",   3); j += 3; break;
+    case '"':  memcpy(out + j, "&quot;", 6); j += 6; break;
+    default:   out[j++] = in[i];
+    }
+  }
+  out[j] = '\0';
+}
+
+static unsigned int rgb_hex(int col) {
+  return ((unsigned int) R_RED(col) << 16) |
+    ((unsigned int) R_GREEN(col) << 8) |
+    (unsigned int) R_BLUE(col);
+}
+
+static void sp_open(xdrDesc *d, const char *name) {
+  fprintf(d->out,
+          "<xdr:sp macro=\"\" textlink=\"\">"
+            "<xdr:nvSpPr><xdr:cNvPr id=\"%d\" name=\"%s\"/><xdr:cNvSpPr/></xdr:nvSpPr>",
+              d->shape_id++, name);
+}
+
+static void xfrm(xdrDesc *d, double x1, double y1, double x2, double y2) {
+  double min_x = x1 < x2 ? x1 : x2;
+  double min_y = y1 < y2 ? y1 : y2;
+  double cx = fabs(x2 - x1) * PT_TO_EMU;
+  double cy = fabs(y2 - y1) * PT_TO_EMU;
+
+  fprintf(d->out, "<a:xfrm><a:off x=\"%.0f\" y=\"%.0f\"/><a:ext cx=\"%.0f\" cy=\"%.0f\"/></a:xfrm>",
+          min_x * PT_TO_EMU, min_y * PT_TO_EMU, cx, cy);
+}
+
+static void fill_props(xdrDesc *d, int fill) {
+  if (fill == NA_INTEGER || R_TRANSPARENT(fill)) {
+    fprintf(d->out, "<a:noFill/>");
+  } else {
+    int alpha = (int)(R_ALPHA(fill) / 255.0 * 100000.0);
+    fprintf(d->out, "<a:solidFill><a:srgbClr val=\"%06X\"><a:alpha val=\"%d\"/></a:srgbClr></a:solidFill>",
+            rgb_hex(fill), alpha);
+  }
+}
+
+static void line_props(xdrDesc *d, int col, double lwd) {
+  if (col == NA_INTEGER || R_TRANSPARENT(col)) {
+    fprintf(d->out, "<a:ln><a:noFill/></a:ln>");
+  } else {
+    double w_emu = (lwd > 0 ? lwd : 1.0) * 0.75 * PT_TO_EMU;
+    int alpha = (int)(R_ALPHA(col) / 255.0 * 100000.0);
+    fprintf(d->out,
+            "<a:ln w=\"%.0f\"><a:solidFill><a:srgbClr val=\"%06X\"><a:alpha val=\"%d\"/></a:srgbClr></a:solidFill></a:ln>",
+            w_emu, rgb_hex(col), alpha);
+  }
+}
+
+static void points_to_pts(xdrDesc *d, double *x, double *y, int n,
+                          double x0, double y0, double w_emu, double h_emu,
+                          Rboolean closed) {
+  fprintf(d->out,
+          "<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/>"
+          "<a:rect l=\"0\" t=\"0\" r=\"%.0f\" b=\"%.0f\"/><a:pathLst>"
+          "<a:path w=\"%.0f\" h=\"%.0f\">",
+          w_emu <= 0 ? 1.0 : w_emu, h_emu <= 0 ? 1.0 : h_emu,
+                                           w_emu <= 0 ? 1.0 : w_emu, h_emu <= 0 ? 1.0 : h_emu);
+  for (int i = 0; i < n; i++) {
+    double px = (x[i] * PT_TO_EMU) - x0;
+    double py = (y[i] * PT_TO_EMU) - y0;
+    fprintf(d->out, "<a:%s><a:pt x=\"%.0f\" y=\"%.0f\"/></a:%s>",
+            i == 0 ? "moveTo" : "lnTo", px, py,
+            i == 0 ? "moveTo" : "lnTo");
+  }
+  if (closed) fprintf(d->out, "<a:close/>");
+  fprintf(d->out, "</a:path></a:pathLst></a:custGeom>");
+}
+
+static Rboolean fully_outside_clip(xdrDesc *d, double x0, double y0, double x1, double y1) {
+  double cx0 = fmin(d->clip_x0, d->clip_x1);
+  double cx1 = fmax(d->clip_x0, d->clip_x1);
+  double cy0 = fmin(d->clip_y0, d->clip_y1);
+  double cy1 = fmax(d->clip_y0, d->clip_y1);
+  double bx0 = fmin(x0, x1), bx1 = fmax(x0, x1);
+  double by0 = fmin(y0, y1), by1 = fmax(y0, y1);
+  return (bx1 < cx0 || bx0 > cx1 || by1 < cy0 || by0 > cy1) ? TRUE : FALSE;
+}
+
+static void Xdr_Raster(unsigned int *raster, int w, int h,
+                       double x, double y, double width, double height,
+                       double rot, Rboolean interpolate,
+                       const pGEcontext gc, pDevDesc dd) {
+  (void) interpolate; (void) gc; (void) rot;
+  xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  if (w <= 0 || h <= 0) return;
+  double left  = fmin(x, x + width);
+  double right = fmax(x, x + width);
+  double top   = fmin(y, y + height);
+  double bot   = fmax(y, y + height);
+  if (fully_outside_clip(d, left, top, right, bot)) return;
+  double cell_w = (right - left) / (double) w;
+  double cell_h = (bot - top) / (double) h;
+  for (int j = 0; j < h; j++) {
+    int i = 0;
+    while (i < w) {
+      unsigned int col = raster[(size_t) j * (size_t) w + (size_t) i];
+      int run = 1;
+      while (i + run < w &&
+             raster[(size_t) j * (size_t) w + (size_t) (i + run)] == col) run++;
+      if (!R_TRANSPARENT((int) col)) {
+        double rx0 = left + i * cell_w;
+        double rx1 = left + (i + run) * cell_w;
+        double ry0 = top + j * cell_h;
+        double ry1 = top + (j + 1) * cell_h;
+        sp_open(d, "");
+        fprintf(d->out, "<xdr:spPr>");
+        xfrm(d, rx0, ry0, rx1, ry1);
+        fprintf(d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
+        fill_props(d, (int) col);
+        fprintf(d->out, "<a:ln><a:noFill/></a:ln>");
+        fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
+      }
+      i += run;
+    }
+  }
+}
+
+static void Xdr_Activate(const pDevDesc dd) { (void) dd; }
+static void Xdr_Deactivate(pDevDesc dd) { (void) dd; }
+static void Xdr_Mode(int mode, pDevDesc dd) { (void) mode; (void) dd; }
+
+static void Xdr_NewPage(const pGEcontext gc, pDevDesc dd) { (void) gc; (void) dd; }
+
+static void Xdr_Close(pDevDesc dd) {
+  xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+
+  fprintf(d->out, "</xdr:grpSp><xdr:clientData/></xdr:absoluteAnchor></xdr:wsDr>");
+
+  fclose(d->out);
+  free(d);
+}
+
+static void Xdr_Clip(double x0, double x1, double y0, double y1, pDevDesc dd) {
+  xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  d->clip_x0 = x0; d->clip_x1 = x1;
+  d->clip_y0 = y0; d->clip_y1 = y1;
+}
+
+static void Xdr_Size(double *left, double *right, double *bottom, double *top,
+                     pDevDesc dd) {
+  *left = dd->left; *right = dd->right;
+  *bottom = dd->bottom; *top = dd->top;
+}
+
+static double Xdr_StrWidth(const char *str, const pGEcontext gc, pDevDesc dd) {
+  (void) dd;
+  return 0.55 * gc->cex * gc->ps * (double) strlen(str);
+}
+
+static void Xdr_MetricInfo(int c, const pGEcontext gc, double *ascent,
+                           double *descent, double *width, pDevDesc dd) {
+  (void) dd;
+  double sz = gc->cex * gc->ps;
+  *ascent  = 0.75 * sz;
+  *descent = 0.25 * sz;
+  *width   = (c < 0) ? 0.55 * sz : 0.55 * sz;
+}
+
+static void Xdr_Line(double x1, double y1, double x2, double y2,
+                     const pGEcontext gc, pDevDesc dd) {
+  xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  if (fully_outside_clip(d, x1, y1, x2, y2)) return;
+  sp_open(d, "");
+  fprintf(d->out, "<xdr:spPr>");
+  xfrm(d, x1, y1, x2, y2);
+  double x_min = fmin(x1, x2) * PT_TO_EMU;
+  double y_min = fmin(y1, y2) * PT_TO_EMU;
+  double w_emu = fabs(x2 - x1) * PT_TO_EMU;
+  double h_emu = fabs(y2 - y1) * PT_TO_EMU;
+  double pts_x[2] = {x1, x2};
+  double pts_y[2] = {y1, y2};
+  points_to_pts(d, pts_x, pts_y, 2, x_min, y_min, w_emu, h_emu, FALSE);
+  line_props(d, gc->col, gc->lwd);
+  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
+}
+
+static void Xdr_Rect(double x0, double y0, double x1, double y1,
+                     const pGEcontext gc, pDevDesc dd) {
+  xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  if (fully_outside_clip(d, x0, y0, x1, y1)) return;
+  sp_open(d, "");
+  fprintf(d->out, "<xdr:spPr>");
+  xfrm(d, x0, y0, x1, y1);
+  fprintf(d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
+  fill_props(d, gc->fill);
+  line_props(d, gc->col, gc->lwd);
+  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
+}
+
+static void Xdr_Circle(double x, double y, double r, const pGEcontext gc, pDevDesc dd) {
+  xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  if (fully_outside_clip(d, x - r, y - r, x + r, y + r)) return;
+  sp_open(d, "");
+  fprintf(d->out, "<xdr:spPr>");
+  xfrm(d, x - r, y - r, x + r, y + r);
+  fprintf(d->out, "<a:prstGeom prst=\"ellipse\"><a:avLst/></a:prstGeom>");
+  fill_props(d, gc->fill);
+  line_props(d, gc->col, gc->lwd);
+  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
+}
+
+static void bbox(double *x, double *y, int n, double *x0, double *y0,
+                 double *x1, double *y1) {
+  *x0 = *x1 = x[0]; *y0 = *y1 = y[0];
+  for (int i = 1; i < n; i++) {
+    if (x[i] < *x0) *x0 = x[i];
+    if (x[i] > *x1) *x1 = x[i];
+    if (y[i] < *y0) *y0 = y[i];
+    if (y[i] > *y1) *y1 = y[i];
+  }
+}
+
+static void Xdr_Polyline(int n, double *x, double *y, const pGEcontext gc, pDevDesc dd) {
+  xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  double x0, y0, x1, y1;
+  bbox(x, y, n, &x0, &y0, &x1, &y1);
+  if (fully_outside_clip(d, x0, y0, x1, y1)) return;
+  sp_open(d, "");
+  fprintf(d->out, "<xdr:spPr>");
+  xfrm(d, x0, y0, x1, y1);
+  double x_min = fmin(x0, x1) * PT_TO_EMU;
+  double y_min = fmin(y0, y1) * PT_TO_EMU;
+  double w_emu = fabs(x1 - x0) * PT_TO_EMU;
+  double h_emu = fabs(y1 - y0) * PT_TO_EMU;
+  points_to_pts(d, x, y, n, x_min, y_min, w_emu, h_emu, FALSE);
+  fprintf(d->out, "<a:noFill/>");
+  line_props(d, gc->col, gc->lwd);
+  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
+}
+
+static void Xdr_Polygon(int n, double *x, double *y, const pGEcontext gc, pDevDesc dd) {
+  xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  double x0, y0, x1, y1;
+  bbox(x, y, n, &x0, &y0, &x1, &y1);
+  if (fully_outside_clip(d, x0, y0, x1, y1)) return;
+  sp_open(d, "");
+  fprintf(d->out, "<xdr:spPr>");
+  xfrm(d, x0, y0, x1, y1);
+  double x_min = fmin(x0, x1) * PT_TO_EMU;
+  double y_min = fmin(y0, y1) * PT_TO_EMU;
+  double w_emu = fabs(x1 - x0) * PT_TO_EMU;
+  double h_emu = fabs(y1 - y0) * PT_TO_EMU;
+  points_to_pts(d, x, y, n, x_min, y_min, w_emu, h_emu, TRUE);
+  fill_props(d, gc->fill);
+  line_props(d, gc->col, gc->lwd);
+  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
+}
+
+static void Xdr_TextImpl(double x, double y, const char *str, double rot,
+                         double hadj, const pGEcontext gc, pDevDesc dd) {
+  xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  char buf[2048];
+  esc_xml(str, buf, sizeof(buf));
+  double w = Xdr_StrWidth(str, gc, dd);
+  double h = (gc->cex * gc->ps) * 1.2;
+
+  double bx0, by0, bx1, by1;
+  if (fabs(rot) > 1e-4) {
+    double rad = rot * M_PI / 180.0;
+    double cos_r = cos(rad);
+    double sin_r = sin(rad);
+    double rx = x - (w / 2.0) * (1.0 - cos_r) + (h / 2.0) * sin_r;
+    double ry = y - (h / 2.0) * (1.0 + cos_r) - (w / 2.0) * sin_r;
+    bx0 = rx; by0 = ry; bx1 = rx + w; by1 = ry + h;
+  } else {
+    double base_x = x - hadj * w;
+    bx0 = base_x; by0 = y - h; bx1 = base_x + w; by1 = y;
+  }
+  if (fully_outside_clip(d, bx0, by0, bx1, by1)) return;
+
+  sp_open(d, "");
+  fprintf(d->out, "<xdr:spPr>");
+
+  xfrm(d, bx0, by0, bx1, by1);
+
+  fprintf(d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/>"
+            "<a:ln><a:noFill/></a:ln></xdr:spPr>");
+
+  if (fabs(rot) > 1e-4) {
+    int ooxml_rot = (int) (-rot * 60000.0);
+    fprintf(d->out, "<xdr:txBody><a:bodyPr rot=\"%d\" vert=\"horz\" anchor=\"ctr\" wrap=\"none\"/>", ooxml_rot);
+  } else {
+    fprintf(d->out, "<xdr:txBody><a:bodyPr anchor=\"b\" wrap=\"none\"/>");
+  }
+
+  int alpha = (int)(R_ALPHA(gc->col) / 255.0 * 100000.0 + 0.5);
+  const char *b_attr = (gc->fontface == 2 || gc->fontface == 4) ? " b=\"1\"" : "";
+  const char *i_attr = (gc->fontface == 3 || gc->fontface == 4) ? " i=\"1\"" : "";
+
+  fprintf(d->out,
+          "<a:p><a:pPr algn=\"ctr\"/><a:r>"
+          "<a:rPr sz=\"%d\"%s%s><a:solidFill><a:srgbClr val=\"%06X\"><a:alpha val=\"%d\"/></a:srgbClr></a:solidFill></a:rPr>"
+          "<a:t>%s</a:t></a:r></a:p></xdr:txBody></xdr:sp>\n",
+          (int)(gc->cex * gc->ps * 100), // %d (sz)
+          b_attr,                        // %s (b_attr)
+          i_attr,                        // %s (i_attr)
+          rgb_hex(gc->col),              // %06X (color)
+          alpha,                         // %d (alpha)
+          buf);                          // %s (text)
+}
+
+static void Xdr_Text(double x, double y, const char *str, double rot,
+                     double hadj, const pGEcontext gc, pDevDesc dd) {
+  Xdr_TextImpl(x, y, str, rot, hadj, gc, dd);
+}
+
+static SEXP Xdr_SetPattern(SEXP pattern, pDevDesc dd) {
+  (void) pattern; (void) dd;
+  return R_NilValue;
+}
+
+static void Xdr_ReleasePattern(SEXP ref, pDevDesc dd) {
+  (void) ref; (void) dd;
+}
+
+static SEXP Xdr_SetClipPath(SEXP path, SEXP ref, pDevDesc dd) {
+  (void) path; (void) ref; (void) dd;
+  return R_NilValue;
+}
+
+static void Xdr_ReleaseClipPath(SEXP ref, pDevDesc dd) {
+  (void) ref; (void) dd;
+}
+
+static SEXP Xdr_SetMask(SEXP path, SEXP ref, pDevDesc dd) {
+  (void) path; (void) ref; (void) dd;
+  return R_NilValue;
+}
+
+static void Xdr_ReleaseMask(SEXP ref, pDevDesc dd) {
+  (void) ref; (void) dd;
+}
+
+SEXP xdrxlsx_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_) {
+  const char *path = CHAR(STRING_ELT(path_, 0));
+  double width  = REAL(width_)[0];
+  double height = REAL(height_)[0];
+  double ps     = REAL(pointsize_)[0];
+
+  R_GE_checkVersionOrDie(R_GE_version);
+  R_CheckDeviceAvailable();
+
+  pDevDesc dd = (pDevDesc) calloc(1, sizeof(DevDesc));
+  if (dd == NULL) error("could not allocate device");
+
+  xdrDesc *xd = (xdrDesc *) calloc(1, sizeof(xdrDesc));
+  if (xd == NULL) { free(dd); error("could not allocate device"); }
+
+  xd->out = fopen(path, "w");
+  if (xd->out == NULL) { free(xd); free(dd); error("cannot open '%s'", path); }
+  xd->shape_id = 1;
+  xd->clip_x0 = 0; xd->clip_y0 = 0;
+  xd->clip_x1 = width * 72.0; xd->clip_y1 = height * 72.0;
+
+  double dev_w = width * 72.0;
+  double dev_h = height * 72.0;
+  double emu_w = dev_w * PT_TO_EMU;
+  double emu_h = dev_h * PT_TO_EMU;
+
+  fprintf(xd->out,
+          "<xdr:wsDr xmlns:xdr=\"http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing\" "
+            "xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\">"
+            "<xdr:absoluteAnchor>"
+            "<xdr:pos x=\"0\" y=\"0\"/>"
+            "<xdr:ext cx=\"%.0f\" cy=\"%.0f\"/>"
+            "<xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr id=\"0\" name=\"R_Graphics_Group\"/><xdr:cNvGrpSpPr/></xdr:nvGrpSpPr>"
+            "<xdr:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%.0f\" cy=\"%.0f\"/>"
+            "<a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"%.0f\" cy=\"%.0f\"/></a:xfrm></xdr:grpSpPr>",
+              emu_w, emu_h,
+              emu_w, emu_h,
+              emu_w, emu_h);
+
+  dd->left = 0; dd->right = dev_w;
+  dd->top = 0; dd->bottom = dev_h;
+  dd->clipLeft = dd->left; dd->clipRight = dd->right;
+  dd->clipTop = dd->top; dd->clipBottom = dd->bottom;
+
+  dd->xCharOffset = 0.4900;
+  dd->yCharOffset = 0.3333;
+  dd->yLineBias = 0.2;
+  dd->ipr[0] = dd->ipr[1] = 1.0 / 72.0;
+  dd->cra[0] = 0.9 * ps;
+  dd->cra[1] = 1.2 * ps;
+  dd->gamma = 1;
+  dd->canClip = TRUE;
+  dd->canHAdj = 0;
+  dd->canChangeGamma = FALSE;
+  dd->startps = ps;
+  dd->startcol = (int) R_RGB(0, 0, 0);
+  dd->startfill = (int) R_RGBA(255, 255, 255, 0);
+  dd->startlty = 0;
+  dd->startfont = 1;
+  dd->startgamma = 1;
+
+  dd->deviceSpecific = xd;
+  dd->displayListOn = FALSE;
+
+  dd->activate = Xdr_Activate;
+  dd->circle = Xdr_Circle;
+  dd->clip = Xdr_Clip;
+  dd->close = Xdr_Close;
+  dd->deactivate = Xdr_Deactivate;
+  dd->locator = NULL;
+  dd->line = Xdr_Line;
+  dd->metricInfo = Xdr_MetricInfo;
+  dd->mode = Xdr_Mode;
+  dd->newPage = Xdr_NewPage;
+  dd->polygon = Xdr_Polygon;
+  dd->polyline = Xdr_Polyline;
+  dd->rect = Xdr_Rect;
+  dd->path = NULL;
+  dd->raster = Xdr_Raster;
+  dd->cap = NULL;
+  dd->size = Xdr_Size;
+  dd->strWidth = Xdr_StrWidth;
+  dd->text = Xdr_Text;
+  dd->onExit = NULL;
+  dd->getEvent = NULL;
+  dd->newFrameConfirm = NULL;
+
+  dd->hasTextUTF8 = TRUE;
+  dd->textUTF8 = Xdr_Text;
+  dd->strWidthUTF8 = Xdr_StrWidth;
+  dd->wantSymbolUTF8 = FALSE;
+  dd->useRotatedTextInContour = FALSE;
+
+  dd->eventEnv = R_NilValue;
+  dd->eventHelper = NULL;
+  dd->holdflush = NULL;
+
+  dd->haveTransparency = 2;
+  dd->haveTransparentBg = 2;
+  dd->haveRaster = 1;
+  dd->haveCapture = 1;
+  dd->haveLocator = 1;
+
+  dd->deviceVersion = R_GE_definitions;
+  dd->deviceClip = FALSE;
+
+  dd->setPattern = Xdr_SetPattern;
+  dd->releasePattern = Xdr_ReleasePattern;
+  dd->setClipPath = Xdr_SetClipPath;
+  dd->releaseClipPath = Xdr_ReleaseClipPath;
+  dd->setMask = Xdr_SetMask;
+  dd->releaseMask = Xdr_ReleaseMask;
+
+  pGEDevDesc gdd = GEcreateDevDesc(dd);
+  GEaddDevice2(gdd, "xdrxlsx");
+  GEinitDisplayList(gdd);
+
+  return R_NilValue;
+}
+
+static const R_CallMethodDef CallEntries[] = {
+  {"xdrxlsx_", (DL_FUNC) &xdrxlsx_, 4},
+  {NULL, NULL, 0}
+};
+
+void R_init_xdrxlsx(DllInfo *dll) {
+  R_registerRoutines(dll, NULL, CallEntries, NULL, NULL);
+  R_useDynamicSymbols(dll, FALSE);
+}
