@@ -1,3 +1,4 @@
+#define R_NO_REMAP
 #include <R.h>
 #include <Rinternals.h>
 #include <R_ext/GraphicsEngine.h>
@@ -548,13 +549,13 @@ SEXP xdrxlsx_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
   R_CheckDeviceAvailable();
 
   pDevDesc dd = (pDevDesc) calloc(1, sizeof(DevDesc));
-  if (dd == NULL) error("could not allocate device");
+  if (dd == NULL) Rf_error("could not allocate device");
 
   xdrDesc *xd = (xdrDesc *) calloc(1, sizeof(xdrDesc));
-  if (xd == NULL) { free(dd); error("could not allocate device"); }
+  if (xd == NULL) { free(dd); Rf_error("could not allocate device"); }
 
   xd->out = fopen(path, "w");
-  if (xd->out == NULL) { free(xd); free(dd); error("cannot open '%s'", path); }
+  if (xd->out == NULL) { free(xd); free(dd); Rf_error("cannot open '%s'", path); }
   xd->shape_id = 1;
   xd->clip_x0 = 0; xd->clip_y0 = 0;
   xd->clip_x1 = width * 72.0; xd->clip_y1 = height * 72.0;

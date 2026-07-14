@@ -136,7 +136,7 @@ test_that("opening a second device deactivates the first without corrupting its 
 
   expect_true(file.exists(f1))
   expect_true(file.exists(f2))
-  # expect_wellformed_fragment(f1)
+  expect_wellformed_fragment(f1)
   expect_wellformed_fragment(f2)
 
   f <- xdr_xlsx(width = 3, height = 3)
