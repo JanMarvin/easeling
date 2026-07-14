@@ -21,10 +21,10 @@ count_matches <- function(file, pattern) {
   lengths(regmatches(read_xml_text(file), gregexpr(pattern, read_xml_text(file))))[[1]]
 }
 
-# xdr_xlsx(): basic device lifecycle ---------------------------------------
+# easel_dev(): basic device lifecycle ---------------------------------------
 
-test_that("xdr_xlsx creates a device and writes a well-formed root structure", {
-  f <- xdr_xlsx(width = 4, height = 3)
+test_that("easel_dev creates a device and writes a well-formed root structure", {
+  f <- easel_dev(width = 4, height = 3)
   plot(1:5)
   dev.off()
 
@@ -38,7 +38,7 @@ test_that("xdr_xlsx creates a device and writes a well-formed root structure", {
 })
 
 test_that("device size (width/height) maps to the correct EMU extent", {
-  f <- xdr_xlsx(width = 5, height = 2)
+  f <- easel_dev(width = 5, height = 2)
   plot.new()
   dev.off()
 
@@ -49,7 +49,7 @@ test_that("device size (width/height) maps to the correct EMU extent", {
 })
 
 test_that("returned path is invisible and usable directly", {
-  f <- withVisible(xdr_xlsx(width = 3, height = 3))
+  f <- withVisible(easel_dev(width = 3, height = 3))
   expect_false(f$visible)
   plot.new()
   dev.off()
@@ -59,7 +59,7 @@ test_that("returned path is invisible and usable directly", {
 # Shape primitives ----------------------------------------------------------
 
 test_that("rect() produces an xdr:sp with prstGeom rect", {
-  f <- xdr_xlsx(width = 3, height = 3)
+  f <- easel_dev(width = 3, height = 3)
   plot.new()
   rect(0.2, 0.2, 0.8, 0.8, col = "red")
   dev.off()
@@ -67,14 +67,14 @@ test_that("rect() produces an xdr:sp with prstGeom rect", {
 })
 
 test_that("points(pch=19) produces xdr:sp with prstGeom ellipse", {
-  f <- xdr_xlsx(width = 3, height = 3)
+  f <- easel_dev(width = 3, height = 3)
   plot(1:5, pch = 19)
   dev.off()
   expect_gte(count_matches(f, 'prstGeom prst="ellipse"'), 5)
 })
 
 test_that("lines/segments produce custGeom paths", {
-  f <- xdr_xlsx(width = 3, height = 3)
+  f <- easel_dev(width = 3, height = 3)
   plot.new()
   segments(0.1, 0.1, 0.9, 0.9)
   dev.off()
@@ -82,7 +82,7 @@ test_that("lines/segments produce custGeom paths", {
 })
 
 test_that("lines() with multiple points produces an open (non-closed) polyline path", {
-  f <- xdr_xlsx(width = 3, height = 3)
+  f <- easel_dev(width = 3, height = 3)
   plot.new()
   lines(c(0.1, 0.4, 0.7, 0.9), c(0.2, 0.6, 0.3, 0.8))
   dev.off()
@@ -92,7 +92,7 @@ test_that("lines() with multiple points produces an open (non-closed) polyline p
 })
 
 test_that("NA border colour produces a no-fill line (not a solid stroke)", {
-  f <- xdr_xlsx(width = 3, height = 3)
+  f <- easel_dev(width = 3, height = 3)
   plot.new()
   rect(0.2, 0.2, 0.8, 0.8, col = "grey", border = NA)
   dev.off()
@@ -102,7 +102,7 @@ test_that("NA border colour produces a no-fill line (not a solid stroke)", {
 
 test_that("tiling pattern() fills fall back to noFill rather than crash", {
   skip_if_not(exists("pattern", where = asNamespace("grid")))
-  f <- xdr_xlsx(width = 3, height = 3)
+  f <- easel_dev(width = 3, height = 3)
   grid::grid.newpage()
   tile <- grid::pattern(
     grid::circleGrob(r = 0.3, gp = grid::gpar(fill = "orange")),
@@ -117,7 +117,7 @@ test_that("tiling pattern() fills fall back to noFill rather than crash", {
 })
 
 test_that("non-ASCII characters use the fallback width instead of erroring", {
-  f <- xdr_xlsx(width = 3, height = 3)
+  f <- easel_dev(width = 3, height = 3)
   plot.new()
   expect_error(text(0.5, 0.5, "caf\u00e9 \u65e5\u672c\u8a9e"), NA)
   dev.off()
@@ -125,10 +125,10 @@ test_that("non-ASCII characters use the fallback width instead of erroring", {
 })
 
 test_that("opening a second device deactivates the first without corrupting its file", {
-  f1 <- xdr_xlsx(width = 3, height = 3)
+  f1 <- easel_dev(width = 3, height = 3)
   plot(1:5)
 
-  f2 <- xdr_xlsx(width = 3, height = 3)
+  f2 <- easel_dev(width = 3, height = 3)
   plot(1:5)
   dev.off()  # closes f2, f1 becomes active again
 
@@ -139,7 +139,7 @@ test_that("opening a second device deactivates the first without corrupting its 
   expect_wellformed_fragment(f1)
   expect_wellformed_fragment(f2)
 
-  f <- xdr_xlsx(width = 3, height = 3)
+  f <- easel_dev(width = 3, height = 3)
   plot.new()
   polygon(c(0.2, 0.5, 0.8), c(0.2, 0.8, 0.2), col = "blue")
   dev.off()
@@ -147,7 +147,7 @@ test_that("opening a second device deactivates the first without corrupting its 
 })
 
 test_that("text() renders with escaping for XML-special characters", {
-  f <- xdr_xlsx(width = 3, height = 3)
+  f <- easel_dev(width = 3, height = 3)
   plot.new()
   text(0.5, 0.5, "A & B < C > D \"quoted\"")
   dev.off()
@@ -157,7 +157,7 @@ test_that("text() renders with escaping for XML-special characters", {
 })
 
 test_that("bold/italic fontface maps to b/i attributes", {
-  f <- xdr_xlsx(width = 3, height = 3)
+  f <- easel_dev(width = 3, height = 3)
   plot.new()
   text(0.5, 0.5, "bold", font = 2)
   text(0.5, 0.3, "italic", font = 3)
@@ -169,7 +169,7 @@ test_that("bold/italic fontface maps to b/i attributes", {
 })
 
 test_that("rotated text (srt) does not crash and stays on-canvas", {
-  f <- xdr_xlsx(width = 4, height = 4)
+  f <- easel_dev(width = 4, height = 4)
   plot.new()
   text(0.5, 0.5, "rotated label", srt = 90)
   dev.off()
@@ -184,7 +184,7 @@ test_that("text() always reaches the device with hadj=0 (R pre-shifts x itself)"
   # means our device's a:pPr algn is "l" in practice for all real text;
   # the r/ctr branches exist to match the documented device API contract
   # but aren't reachable via any public R plotting call we could find.
-  f <- xdr_xlsx(width = 3, height = 3)
+  f <- easel_dev(width = 3, height = 3)
   plot.new()
   text(0.2, 0.8, "left", adj = c(0, 0.5))
   text(0.2, 0.5, "right", adj = c(1, 0.5))
@@ -200,7 +200,7 @@ test_that("text() always reaches the device with hadj=0 (R pre-shifts x itself)"
 # Clipping -------------------------------------------------------------------
 
 test_that("shapes fully outside the current clip region are dropped", {
-  f <- xdr_xlsx(width = 4, height = 4)
+  f <- easel_dev(width = 4, height = 4)
   plot(1:10, 1:10, xlim = c(1, 10), ylim = c(1, 10))
   # a point far outside the plotted user range/device won't be drawn
   points(1e6, 1e6, pch = 19)
@@ -212,7 +212,7 @@ test_that("shapes fully outside the current clip region are dropped", {
 # Raster -----------------------------------------------------------------
 
 test_that("grid.raster() renders as run-length-encoded rects, not silently dropped", {
-  f <- xdr_xlsx(width = 3, height = 3)
+  f <- easel_dev(width = 3, height = 3)
   grid::grid.newpage()
   suppressWarnings(
     grid::grid.raster(as.raster(matrix(c("red", "blue"), nrow = 2)))
@@ -222,7 +222,7 @@ test_that("grid.raster() renders as run-length-encoded rects, not silently dropp
 })
 
 test_that("dev.capabilities() reports raster support as available", {
-  f <- xdr_xlsx(width = 2, height = 2)
+  f <- easel_dev(width = 2, height = 2)
   plot.new()
   caps <- dev.capabilities()
   dev.off()
@@ -232,7 +232,7 @@ test_that("dev.capabilities() reports raster support as available", {
 # Path (polygons with holes) --------------------------------------------------
 
 test_that("grid.path() with multiple sub-paths (a hole) renders both rings", {
-  f <- xdr_xlsx(width = 3, height = 3)
+  f <- easel_dev(width = 3, height = 3)
   grid::grid.newpage()
   grid::grid.path(
     x = c(0.2, 0.8, 0.8, 0.2, 0.35, 0.65, 0.65, 0.35),
@@ -250,7 +250,7 @@ test_that("grid.path() with multiple sub-paths (a hole) renders both rings", {
 # Gradients ----------------------------------------------------------------
 
 test_that("linearGradient fill emits a:gradFill with correct stops", {
-  f <- xdr_xlsx(width = 3, height = 3)
+  f <- easel_dev(width = 3, height = 3)
   grid::grid.newpage()
   grid::grid.rect(gp = grid::gpar(
     fill = grid::linearGradient(colours = c("#FF0000", "#0000FF"))
@@ -264,7 +264,7 @@ test_that("linearGradient fill emits a:gradFill with correct stops", {
 })
 
 test_that("radialGradient fill emits a:gradFill with a circular path", {
-  f <- xdr_xlsx(width = 3, height = 3)
+  f <- easel_dev(width = 3, height = 3)
   grid::grid.newpage()
   grid::grid.circle(gp = grid::gpar(
     fill = grid::radialGradient(colours = c("yellow", "darkred"))
@@ -276,7 +276,7 @@ test_that("radialGradient fill emits a:gradFill with a circular path", {
 })
 
 test_that("plain solid fills are unaffected by gradient support", {
-  f <- xdr_xlsx(width = 3, height = 3)
+  f <- easel_dev(width = 3, height = 3)
   plot.new()
   rect(0.2, 0.2, 0.8, 0.8, col = "green")
   dev.off()
@@ -288,7 +288,7 @@ test_that("plain solid fills are unaffected by gradient support", {
 # Transparency ---------------------------------------------------------------
 
 test_that("alpha-transparent colours produce a non-100000 alpha value", {
-  f <- xdr_xlsx(width = 3, height = 3)
+  f <- easel_dev(width = 3, height = 3)
   plot.new()
   rect(0.2, 0.2, 0.8, 0.8, col = grDevices::adjustcolor("red", alpha.f = 0.5))
   dev.off()
@@ -297,7 +297,7 @@ test_that("alpha-transparent colours produce a non-100000 alpha value", {
 })
 
 test_that("fully transparent fill emits noFill instead of a zero-alpha solidFill", {
-  f <- xdr_xlsx(width = 3, height = 3)
+  f <- easel_dev(width = 3, height = 3)
   plot.new()
   rect(0.2, 0.2, 0.8, 0.8, col = NA, border = "black")
   dev.off()
@@ -307,7 +307,7 @@ test_that("fully transparent fill emits noFill instead of a zero-alpha solidFill
 # Fonts -----------------------------------------------------------------
 
 test_that("default fontname is applied when R doesn't request a specific family", {
-  f <- xdr_xlsx(width = 3, height = 3, fontname = "Georgia")
+  f <- easel_dev(width = 3, height = 3, fontname = "Georgia")
   plot.new()
   text(0.5, 0.5, "hello")
   dev.off()
@@ -315,7 +315,7 @@ test_that("default fontname is applied when R doesn't request a specific family"
 })
 
 test_that("a real par(family=) overrides the device default", {
-  f <- xdr_xlsx(width = 3, height = 3, fontname = "Georgia")
+  f <- easel_dev(width = 3, height = 3, fontname = "Georgia")
   op <- par(family = "Consolas")
   on.exit(par(op))
   plot.new()
@@ -325,7 +325,7 @@ test_that("a real par(family=) overrides the device default", {
 })
 
 test_that("generic family aliases (sans/serif/mono) fall back to the device default", {
-  f <- xdr_xlsx(width = 3, height = 3, fontname = "Georgia")
+  f <- easel_dev(width = 3, height = 3, fontname = "Georgia")
   op <- par(family = "sans")
   on.exit(par(op))
   plot.new()
@@ -336,7 +336,7 @@ test_that("generic family aliases (sans/serif/mono) fall back to the device defa
 })
 
 test_that("underline and strikeout flags are applied device-wide", {
-  f <- xdr_xlsx(width = 3, height = 3, underline = TRUE, strikeout = TRUE)
+  f <- easel_dev(width = 3, height = 3, underline = TRUE, strikeout = TRUE)
   plot.new()
   text(0.5, 0.5, "styled")
   dev.off()
@@ -345,49 +345,11 @@ test_that("underline and strikeout flags are applied device-wide", {
   expect_match(txt, 'strike="sngStrike"')
 })
 
-# xdr_fit() -------------------------------------------------------------
-
-test_that("xdr_fit rewrites only the outer display box, preserving chOff/chExt", {
-  f <- xdr_xlsx(width = 6, height = 4)
-  plot(1:10, (1:10)^2, type = "b")
-  dev.off()
-
-  before_txt <- read_xml_text(f)
-  before_shapes <- count_matches(f, "<xdr:sp ")
-
-  xdr_fit(f, width = 4.67, height = 3.13)
-
-  after_txt <- read_xml_text(f)
-  after_shapes <- count_matches(f, "<xdr:sp ")
-
-  expect_equal(before_shapes, after_shapes)
-  expect_match(after_txt, paste0('cx="', round(4.67 * 914400), '"'))
-  expect_match(after_txt, paste0('cy="', round(3.13 * 914400), '"'))
-  # child coordinate space must stay at the ORIGINAL render size
-  expect_match(after_txt, paste0('chExt cx="', round(6 * 914400), '"'))
-  expect_match(after_txt, paste0('chExt cx="', round(6 * 914400), '"'))
-})
-
-test_that("xdr_fit warns (without erroring) on an unexpected file structure", {
-  tmp <- tempfile(fileext = ".xml")
-  writeLines("<not-a-drawing/>", tmp)
-  expect_warning(xdr_fit(tmp, width = 4, height = 3), "could not find")
-})
-
-test_that("xdr_fit returns the file path invisibly", {
-  f <- xdr_xlsx(width = 4, height = 3)
-  plot.new()
-  dev.off()
-  res <- withVisible(xdr_fit(f, width = 2, height = 2))
-  expect_false(res$visible)
-  expect_equal(res$value, f)
-})
-
 # Integration with openxlsx2 (skipped if not installed) ----------------------
 
 test_that("output is accepted by openxlsx2::wb_add_drawing when available", {
   skip_if_not_installed("openxlsx2")
-  f <- xdr_xlsx(width = 4, height = 3)
+  f <- easel_dev(width = 4, height = 3)
   plot(1:10, (1:10)^2, type = "b")
   dev.off()
 

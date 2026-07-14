@@ -1,5 +1,5 @@
 
-# xdrxlsx
+# easeling
 
 A small graphics device that writes R plots directly as OOXML DrawingML
 shapes, for use with `openxlsx2::wb_add_drawing()`. No Cairo, FreeType,
@@ -9,25 +9,24 @@ fontconfig, or xml2 dependency.
 
 ``` r
 # install.packages("remotes")
-remotes::install_github("JanMarvin/xdrxlsx")
+remotes::install_github("JanMarvin/easeling")
 ```
 
 ## Usage
 
-`xdr_xlsx()` opens the device and returns a file path. Draw with any R
+`easel_dev()` opens the device and returns a file path. Draw with any R
 plotting system, call `dev.off()`, then hand the file to
 `openxlsx2::wb_add_drawing()`.
 
 ``` r
-library(xdrxlsx)
+library(easeling)
 library(openxlsx2)
 
-f <- xdr_xlsx(width = 6, height = 4)
+f <- easel_dev(width = 6, height = 4)
 plot(1:10, (1:10)^2, type = "b")
 dev.off()
 
 wb <- wb_workbook()$add_worksheet()$add_drawing(xml = f, dims = "A1")
-wb$save("plot.xlsx")
 ```
 
 ### tinyplot
@@ -35,7 +34,7 @@ wb$save("plot.xlsx")
 ``` r
 library(tinyplot)
 
-f <- xdr_xlsx(width = 6, height = 4)
+f <- easel_dev(width = 6, height = 4)
 plt(mpg ~ wt | factor(cyl), data = mtcars)
 dev.off()
 
@@ -47,7 +46,7 @@ wb$add_worksheet()$add_drawing(xml = f, dims = "A1")
 ``` r
 library(ggplot2)
 
-f <- xdr_xlsx(width = 6, height = 4)
+f <- easel_dev(width = 6, height = 4)
 print(
   ggplot(mtcars, aes(wt, mpg, color = factor(cyl))) +
     geom_point() +
@@ -56,17 +55,8 @@ print(
 dev.off()
 
 wb$add_worksheet()$add_drawing(xml = f, dims = "A1")
-```
 
-## Fitting a specific cell range
-
-`wb_add_drawing(dims = "A1:G15")` repositions the drawing but does not
-rescale it to the cell range’s actual size. If you need it to match a
-specific range, either anchor it to a single cell (`dims = "A1"`, which
-preserves the exact rendered size), or rescale first:
-
-``` r
-xdr_fit(f, width = 4.67, height = 3.13)
+if (interactive()) wb$open()
 ```
 
 ## Notes

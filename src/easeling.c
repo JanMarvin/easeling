@@ -535,7 +535,7 @@ static void Xdr_ReleaseMask(SEXP ref, pDevDesc dd) {
   (void) ref; (void) dd;
 }
 
-SEXP xdrxlsx_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
+SEXP easeling_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
               SEXP fontname_, SEXP underline_, SEXP strikeout_) {
   const char *path = CHAR(STRING_ELT(path_, 0));
   double width  = REAL(width_)[0];
@@ -657,18 +657,18 @@ SEXP xdrxlsx_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
   dd->releaseMask = Xdr_ReleaseMask;
 
   pGEDevDesc gdd = GEcreateDevDesc(dd);
-  GEaddDevice2(gdd, "xdrxlsx");
+  GEaddDevice2(gdd, "easeling");
   GEinitDisplayList(gdd);
 
   return R_NilValue;
 }
 
 static const R_CallMethodDef CallEntries[] = {
-  {"xdrxlsx_", (DL_FUNC) &xdrxlsx_, 7},
+  {"easeling_", (DL_FUNC) &easeling_, 7},
   {NULL, NULL, 0}
 };
 
-void R_init_xdrxlsx(DllInfo *dll) {
+void R_init_easeling(DllInfo *dll) {
   R_registerRoutines(dll, NULL, CallEntries, NULL, NULL);
   R_useDynamicSymbols(dll, FALSE);
 }

@@ -7,6 +7,6 @@
 # * https://testthat.r-lib.org/articles/special-files.html
 
 library(testthat)
-library(xdrxlsx)
+library(easeling)
 
-test_check("xdrxlsx")
+test_check("easeling")

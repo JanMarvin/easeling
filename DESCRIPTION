@@ -1,4 +1,4 @@
-Package: xdrxlsx
+Package: easeling
 Type: Package
 Title: Minimal DrawingML Graphics Device for openxlsx2
 Version: 0.1.0
