@@ -21,7 +21,15 @@ typedef struct {
   FILE *out;
   int shape_id;
   double clip_x0, clip_y0, clip_x1, clip_y1;
+  char fontname[201];
+  Rboolean underline;
+  Rboolean strikeout;
 } xdrDesc;
+
+static int is_generic_family(const char *f) {
+  return f[0] == '\0' || strcmp(f, "sans") == 0 || strcmp(f, "serif") == 0 ||
+    strcmp(f, "mono") == 0 || strcmp(f, "symbol") == 0;
+}
 
 static void esc_xml(const char *in, char *out, size_t outlen) {
   size_t j = 0;
@@ -178,9 +186,47 @@ static void Xdr_Size(double *left, double *right, double *bottom, double *top,
   *bottom = dd->bottom; *top = dd->top;
 }
 
+/* Per-character width as a fraction of pointsize, measured from a real
+ Cairo-backed sans-serif font. A flat average (the previous 0.55
+ constant) diverges enough from real widths that callers doing their
+ own centering math (e.g. tinyplot's facet strip labels, which query
+ strwidth() to pre-center text before left-aligning it) land visibly
+ off. Index 0 covers ASCII space (32) through '~' (126); anything
+ outside that range falls back to FALLBACK_CHAR_W. */
+#define FALLBACK_CHAR_W 0.55
+
+static const double CHAR_W[126 - 32 + 1] = {
+  /* ' ' !  "    #    $    %    &    '    (    )    *    +    ,    -    .    / */
+  0.25,0.25,0.30,0.55,0.55,0.85,0.65,0.20,0.30,0.30,0.35,0.55,0.25,0.30,0.25,0.30,
+  /* 0    1    2    3    4    5    6    7    8    9    :    ;    <    =    >    ? */
+  0.583,0.583,0.583,0.583,0.583,0.583,0.583,0.583,0.583,0.583,0.25,0.25,0.55,0.55,0.55,0.50,
+  /* @    A    B    C    D    E    F    G    H    I    J    K    L    M    N    O */
+  0.90,0.667,0.667,0.750,0.750,0.667,0.583,0.750,0.750,0.250,0.500,0.667,0.583,0.833,0.750,0.750,
+  /* P    Q    R    S    T    U    V    W    X    Y    Z    [    \    ]    ^    _ */
+  0.667,0.750,0.750,0.667,0.583,0.750,0.667,0.917,0.667,0.667,0.583,0.30,0.30,0.30,0.55,0.50,
+  /* `    a    b    c    d    e    f    g    h    i    j    k    l    m    n    o */
+  0.30,0.583,0.583,0.500,0.583,0.583,0.250,0.583,0.583,0.250,0.250,0.500,0.250,0.833,0.583,0.583,
+  /* p    q    r    s    t    u    v    w    x    y    z    {    |    }    ~ */
+  0.583,0.583,0.333,0.500,0.250,0.583,0.500,0.750,0.500,0.500,0.500,0.35,0.25,0.35,0.55
+};
+
+static double char_width_frac(unsigned char c) {
+  if (c >= 32 && c <= 126) return CHAR_W[c - 32];
+  return FALLBACK_CHAR_W;
+}
+
 static double Xdr_StrWidth(const char *str, const pGEcontext gc, pDevDesc dd) {
   (void) dd;
-  return 0.55 * gc->cex * gc->ps * (double) strlen(str);
+  double sz = gc->cex * gc->ps;
+  double total = 0.0;
+  for (const unsigned char *p = (const unsigned char *) str; *p != '\0'; p++) {
+    /* Skip UTF-8 continuation bytes (10xxxxxx); treat each lead byte as
+     one glyph at the fallback width, since we don't have real metrics
+     for non-ASCII text. */
+    if ((*p & 0xC0) == 0x80) continue;
+    total += (*p < 0x80) ? char_width_frac(*p) : FALLBACK_CHAR_W;
+  }
+  return total * sz;
 }
 
 static void Xdr_MetricInfo(int c, const pGEcontext gc, double *ascent,
@@ -189,7 +235,7 @@ static void Xdr_MetricInfo(int c, const pGEcontext gc, double *ascent,
   double sz = gc->cex * gc->ps;
   *ascent  = 0.75 * sz;
   *descent = 0.25 * sz;
-  *width   = (c < 0) ? 0.55 * sz : 0.55 * sz;
+  *width   = (c < 0 || c > 126) ? FALLBACK_CHAR_W * sz : char_width_frac((unsigned char) c) * sz;
 }
 
 static void Xdr_Line(double x1, double y1, double x2, double y2,
@@ -282,6 +328,55 @@ static void Xdr_Polygon(int n, double *x, double *y, const pGEcontext gc, pDevDe
   fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
 }
 
+static void Xdr_Path(double *x, double *y, int npoly, int *nper,
+                     Rboolean winding, const pGEcontext gc, pDevDesc dd) {
+  (void) winding;
+  xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  if (npoly < 1) return;
+
+  int total = 0;
+  for (int k = 0; k < npoly; k++) total += nper[k];
+  if (total < 2) return;
+
+  double x0, y0, x1, y1;
+  bbox(x, y, total, &x0, &y0, &x1, &y1);
+  if (fully_outside_clip(d, x0, y0, x1, y1)) return;
+
+  double x_min = fmin(x0, x1) * PT_TO_EMU;
+  double y_min = fmin(y0, y1) * PT_TO_EMU;
+  double w_emu = fabs(x1 - x0) * PT_TO_EMU;
+  double h_emu = fabs(y1 - y0) * PT_TO_EMU;
+  double w_or1 = w_emu <= 0 ? 1.0 : w_emu;
+  double h_or1 = h_emu <= 0 ? 1.0 : h_emu;
+
+  sp_open(d, "");
+  fprintf(d->out, "<xdr:spPr>");
+  xfrm(d, x0, y0, x1, y1);
+  fprintf(d->out,
+          "<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/>"
+          "<a:rect l=\"0\" t=\"0\" r=\"%.0f\" b=\"%.0f\"/><a:pathLst>",
+            w_or1, h_or1);
+
+  int idx = 0;
+  for (int k = 0; k < npoly; k++) {
+    int n = nper[k];
+    fprintf(d->out, "<a:path w=\"%.0f\" h=\"%.0f\">", w_or1, h_or1);
+    for (int i = 0; i < n; i++) {
+      double px = x[idx + i] * PT_TO_EMU - x_min;
+      double py = y[idx + i] * PT_TO_EMU - y_min;
+      fprintf(d->out, "<a:%s><a:pt x=\"%.0f\" y=\"%.0f\"/></a:%s>",
+              i == 0 ? "moveTo" : "lnTo", px, py,
+              i == 0 ? "moveTo" : "lnTo");
+    }
+    fprintf(d->out, "<a:close/></a:path>");
+    idx += n;
+  }
+  fprintf(d->out, "</a:pathLst></a:custGeom>");
+  fill_props(d, gc->fill);
+  line_props(d, gc->col, gc->lwd);
+  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
+}
+
 #define TEXT_Y_NUDGE 1.5
 
 static void Xdr_TextImpl(double x, double y, const char *str, double rot,
@@ -331,19 +426,28 @@ static void Xdr_TextImpl(double x, double y, const char *str, double rot,
   int alpha = (int)(R_ALPHA(gc->col) / 255.0 * 100000.0 + 0.5);
   const char *b_attr = (gc->fontface == 2 || gc->fontface == 4) ? " b=\"1\"" : "";
   const char *i_attr = (gc->fontface == 3 || gc->fontface == 4) ? " i=\"1\"" : "";
+  const char *u_attr = d->underline ? " u=\"sng\"" : "";
+  const char *strike_attr = d->strikeout ? " strike=\"sngStrike\"" : "";
 
   const char *algn = (hadj < 0.25) ? "l" : (hadj > 0.75) ? "r" : "ctr";
+  const char *font = is_generic_family(gc->fontfamily) ? d->fontname : gc->fontfamily;
 
   fprintf(d->out,
           "<a:p><a:pPr algn=\"%s\"/><a:r>"
-          "<a:rPr sz=\"%d\"%s%s><a:solidFill><a:srgbClr val=\"%06X\"><a:alpha val=\"%d\"/></a:srgbClr></a:solidFill></a:rPr>"
+          "<a:rPr sz=\"%d\"%s%s%s%s>"
+          "<a:solidFill><a:srgbClr val=\"%06X\"><a:alpha val=\"%d\"/></a:srgbClr></a:solidFill>"
+          "<a:latin typeface=\"%s\"/><a:cs typeface=\"%s\"/></a:rPr>"
           "<a:t>%s</a:t></a:r></a:p></xdr:txBody></xdr:sp>\n",
           algn,                           // %s (algn)
           (int)(gc->cex * gc->ps * 100), // %d (sz)
           b_attr,                        // %s (b_attr)
           i_attr,                        // %s (i_attr)
+          u_attr,                        // %s (u_attr)
+          strike_attr,                   // %s (strike_attr)
           rgb_hex(gc->col),              // %06X (color)
           alpha,                         // %d (alpha)
+          font,                          // %s (latin typeface)
+          font,                          // %s (cs typeface)
           buf);                          // %s (text)
 }
 
@@ -379,11 +483,15 @@ static void Xdr_ReleaseMask(SEXP ref, pDevDesc dd) {
   (void) ref; (void) dd;
 }
 
-SEXP xdrxlsx_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_) {
+SEXP xdrxlsx_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
+              SEXP fontname_, SEXP underline_, SEXP strikeout_) {
   const char *path = CHAR(STRING_ELT(path_, 0));
   double width  = REAL(width_)[0];
   double height = REAL(height_)[0];
   double ps     = REAL(pointsize_)[0];
+  const char *fontname = CHAR(STRING_ELT(fontname_, 0));
+  Rboolean underline = (Rboolean) LOGICAL(underline_)[0];
+  Rboolean strikeout = (Rboolean) LOGICAL(strikeout_)[0];
 
   R_GE_checkVersionOrDie(R_GE_version);
   R_CheckDeviceAvailable();
@@ -399,6 +507,10 @@ SEXP xdrxlsx_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_) {
   xd->shape_id = 1;
   xd->clip_x0 = 0; xd->clip_y0 = 0;
   xd->clip_x1 = width * 72.0; xd->clip_y1 = height * 72.0;
+  strncpy(xd->fontname, fontname, sizeof(xd->fontname) - 1);
+  xd->fontname[sizeof(xd->fontname) - 1] = '\0';
+  xd->underline = underline;
+  xd->strikeout = strikeout;
 
   double dev_w = width * 72.0;
   double dev_h = height * 72.0;
@@ -456,7 +568,7 @@ SEXP xdrxlsx_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_) {
   dd->polygon = Xdr_Polygon;
   dd->polyline = Xdr_Polyline;
   dd->rect = Xdr_Rect;
-  dd->path = NULL;
+  dd->path = Xdr_Path;
   dd->raster = Xdr_Raster;
   dd->cap = NULL;
   dd->size = Xdr_Size;
@@ -478,9 +590,9 @@ SEXP xdrxlsx_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_) {
 
   dd->haveTransparency = 2;
   dd->haveTransparentBg = 2;
-  dd->haveRaster = 1;
-  dd->haveCapture = 1;
-  dd->haveLocator = 1;
+  dd->haveRaster = 2; /* yes - Xdr_Raster is implemented (RLE rects) */
+  dd->haveCapture = 1; /* no - dd->cap is NULL; R checks before calling, so safe */
+  dd->haveLocator = 1; /* no - dd->locator is NULL; R checks before calling, so safe */
 
   dd->deviceVersion = R_GE_definitions;
   dd->deviceClip = FALSE;
@@ -500,7 +612,7 @@ SEXP xdrxlsx_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_) {
 }
 
 static const R_CallMethodDef CallEntries[] = {
-  {"xdrxlsx_", (DL_FUNC) &xdrxlsx_, 4},
+  {"xdrxlsx_", (DL_FUNC) &xdrxlsx_, 7},
   {NULL, NULL, 0}
 };
 
