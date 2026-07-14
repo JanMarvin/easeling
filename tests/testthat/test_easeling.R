@@ -8,12 +8,12 @@ expect_wellformed_fragment <- function(file) {
     '<root xmlns:xdr="urn:x" xmlns:a="urn:y">', body, "</root>"
   )
   if (requireNamespace("openxlsx2", quietly = TRUE)) {
-    expect_error(openxlsx2::read_xml(wrapped), NA)
+    testthat::expect_error(openxlsx2::read_xml(wrapped), NA)
   } else {
     # fallback: crude open/close tag balance check
     opens <- lengths(regmatches(wrapped, gregexpr("<[a-zA-Z:]+[^/>]*(?<!/)>", wrapped, perl = TRUE)))
     closes <- lengths(regmatches(wrapped, gregexpr("</[a-zA-Z:]+>", wrapped, perl = TRUE)))
-    expect_equal(opens, closes)
+    testthat::expect_equal(opens, closes)
   }
 }
 
