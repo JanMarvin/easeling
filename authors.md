@@ -15,3 +15,7 @@ openxlsx2*. R package version 0.1.0.
       year = {2026},
       note = {R package version 0.1.0},
     }
+
+## Additional details
+
+    Jan Marvin Garbuszus
