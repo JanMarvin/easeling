@@ -60,7 +60,7 @@ The output file path, invisibly.
 f <- easel_dev(width = 6, height = 4, fontname = "Georgia")
 plot(1:10, (1:10)^2, type = "b")
 dev.off()
-#> agg_record_19d5379a3f50 
-#>                       2 
+#> agg_record_19b0cc0802c 
+#>                      2 
 # }
 ```
