@@ -2,14 +2,18 @@ Package: xdrxlsx
 Type: Package
 Title: Minimal DrawingML Graphics Device for openxlsx2
 Version: 0.1.0
+Authors@R: c(
+  person("Jan Marvin", "Garbuszus", email = "jan.garbuszus@ruhr-uni-bochum.de", role = c("aut", "cre"))
+  )
 Description: A base-R graphics device that writes R plots directly as
     OOXML DrawingML shapes, for use with openxlsx2::wb_add_drawing().
     No dependency on Cairo, FreeType, fontconfig, or xml2.
-License: MIT
+License: MIT + file LICENSE
 Encoding: UTF-8
 NeedsCompilation: yes
 Packaged: 2026-07-12 08:38:05 UTC; root
 Config/roxygen2/version: 8.0.0
 Suggests: 
+    openxlsx2,
     testthat (>= 3.0.0)
 Config/testthat/edition: 3

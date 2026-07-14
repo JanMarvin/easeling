@@ -2,15 +2,13 @@
 
 read_xml_text <- function(file) paste(readLines(file, warn = FALSE), collapse = "")
 
-# Minimal well-formedness check that doesn't add an xml2 runtime dependency
-# to the package itself (xml2 is only used here, in tests).
 expect_wellformed_fragment <- function(file) {
   body <- read_xml_text(file)
   wrapped <- paste0(
     '<root xmlns:xdr="urn:x" xmlns:a="urn:y">', body, "</root>"
   )
-  if (requireNamespace("xml2", quietly = TRUE)) {
-    expect_error(xml2::read_xml(wrapped), NA)
+  if (requireNamespace("openxlsx2", quietly = TRUE)) {
+    expect_error(openxlsx2::read_xml(wrapped), NA)
   } else {
     # fallback: crude open/close tag balance check
     opens <- lengths(regmatches(wrapped, gregexpr("<[a-zA-Z:]+[^/>]*(?<!/)>", wrapped, perl = TRUE)))

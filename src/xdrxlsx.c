@@ -1,15 +1,8 @@
-#ifdef __clang__
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wc23-extensions"
-#endif
 #include <R.h>
 #include <Rinternals.h>
 #include <R_ext/GraphicsEngine.h>
 #include <R_ext/GraphicsDevice.h>
 #include <R_ext/Rdynload.h>
-#ifdef __clang__
-#pragma GCC diagnostic pop
-#endif
 
 #include <stdio.h>
 #include <string.h>

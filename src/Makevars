@@ -1,2 +1,0 @@
-PKG_CFLAGS = -Wall -Wextra -Wpedantic -Wshadow -Wunused -Wconversion -Wsign-compare \
-             -Wcast-align -Wnull-dereference -Wdouble-promotion -Wformat=2
