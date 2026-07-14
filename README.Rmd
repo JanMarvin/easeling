@@ -8,6 +8,14 @@ knitr::opts_chunk$set(eval = FALSE)
 
 # easeling
 
+<!-- badges: start -->
+[![R-CMD-check](https://github.com/JanMarvin/easeling/actions/workflows/check-standard.yaml/badge.svg)](https://github.com/JanMarvin/easeling/actions/workflows/check-standard.yaml)
+[![codecov](https://codecov.io/gh/JanMarvin/easeling/graph/badge.svg?token=502XDHVIPF)](https://app.codecov.io/gh/JanMarvin/easeling)
+[![r-universe](https://janmarvin.r-universe.dev/badges/easeling)](https://janmarvin.r-universe.dev/easeling)
+
+<!-- badges: end -->
+
+
 A small graphics device that writes R plots directly as OOXML DrawingML
 shapes, for use with `openxlsx2::wb_add_drawing()`. No Cairo, FreeType,
 fontconfig, or xml2 dependency.
