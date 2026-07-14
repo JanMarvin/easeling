@@ -9,7 +9,7 @@ f2 <- function(x, y) {
   r <- sqrt(x^2 + y^2)
   z <- sin(r) / r
   z[is.na(z)] <- 1
-  return(z)
+  z
 }
 z <- outer(x, y, f2)
 persp(x, y, z, theta = 30, phi = 30, expand = 0.5, col = "lightblue",
