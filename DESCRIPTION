@@ -10,3 +10,6 @@ Encoding: UTF-8
 NeedsCompilation: yes
 Packaged: 2026-07-12 08:38:05 UTC; root
 Config/roxygen2/version: 8.0.0
+Suggests: 
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3

@@ -37,7 +37,7 @@ static void esc_xml(const char *in, char *out, size_t outlen) {
     switch (in[i]) {
     case '&':  memcpy(out + j, "&amp;",  5); j += 5; break;
     case '<':  memcpy(out + j, "&lt;",   4); j += 4; break;
-    case '>':  memcpy(out + j, "&gt;",   3); j += 3; break;
+    case '>':  memcpy(out + j, "&gt;",   4); j += 4; break;
     case '"':  memcpy(out + j, "&quot;", 6); j += 6; break;
     default:   out[j++] = in[i];
     }
@@ -76,6 +76,64 @@ static void fill_props(xdrDesc *d, int fill) {
     fprintf(d->out, "<a:solidFill><a:srgbClr val=\"%06X\"><a:alpha val=\"%d\"/></a:srgbClr></a:solidFill>",
             rgb_hex(fill), alpha);
   }
+}
+
+static void emit_gradient_stops_linear(xdrDesc *d, SEXP pattern) {
+  int n = R_GE_linearGradientNumStops(pattern);
+  fprintf(d->out, "<a:gsLst>");
+  for (int i = 0; i < n; i++) {
+    double stop = R_GE_linearGradientStop(pattern, i);
+    rcolor col = R_GE_linearGradientColour(pattern, i);
+    int pos = (int) round(stop * 100000.0);
+    int alpha = (int)(R_ALPHA((int) col) / 255.0 * 100000.0);
+    fprintf(d->out, "<a:gs pos=\"%d\"><a:srgbClr val=\"%06X\"><a:alpha val=\"%d\"/></a:srgbClr></a:gs>",
+            pos, rgb_hex((int) col), alpha);
+  }
+  fprintf(d->out, "</a:gsLst>");
+}
+
+static void emit_gradient_stops_radial(xdrDesc *d, SEXP pattern) {
+  int n = R_GE_radialGradientNumStops(pattern);
+  fprintf(d->out, "<a:gsLst>");
+  for (int i = 0; i < n; i++) {
+    double stop = R_GE_radialGradientStop(pattern, i);
+    rcolor col = R_GE_radialGradientColour(pattern, i);
+    int pos = (int) round(stop * 100000.0);
+    int alpha = (int)(R_ALPHA((int) col) / 255.0 * 100000.0);
+    fprintf(d->out, "<a:gs pos=\"%d\"><a:srgbClr val=\"%06X\"><a:alpha val=\"%d\"/></a:srgbClr></a:gs>",
+            pos, rgb_hex((int) col), alpha);
+  }
+  fprintf(d->out, "</a:gsLst>");
+}
+
+static void fill_props_gc(xdrDesc *d, const pGEcontext gc) {
+  if (gc->patternFill != R_NilValue && R_GE_isPattern(gc->patternFill)) {
+    int type = R_GE_patternType(gc->patternFill);
+    if (type == R_GE_linearGradientPattern) {
+      double x1 = R_GE_linearGradientX1(gc->patternFill);
+      double y1 = R_GE_linearGradientY1(gc->patternFill);
+      double x2 = R_GE_linearGradientX2(gc->patternFill);
+      double y2 = R_GE_linearGradientY2(gc->patternFill);
+      double ang_deg = atan2(y2 - y1, x2 - x1) * 180.0 / M_PI;
+      if (ang_deg < 0) ang_deg += 360.0;
+      int ang_60000 = (int) round(ang_deg * 60000.0);
+      fprintf(d->out, "<a:gradFill>");
+      emit_gradient_stops_linear(d, gc->patternFill);
+      fprintf(d->out, "<a:lin ang=\"%d\" scaled=\"1\"/></a:gradFill>", ang_60000);
+      return;
+    } else if (type == R_GE_radialGradientPattern) {
+      fprintf(d->out, "<a:gradFill>");
+      emit_gradient_stops_radial(d, gc->patternFill);
+      fprintf(d->out,
+              "<a:path path=\"circle\"><a:fillToRect l=\"50000\" t=\"50000\" "
+              "r=\"50000\" b=\"50000\"/></a:path></a:gradFill>");
+      return;
+    }
+    /* tiling patterns have no clean OOXML equivalent - fall through to noFill */
+    fprintf(d->out, "<a:noFill/>");
+    return;
+  }
+  fill_props(d, gc->fill);
 }
 
 static void line_props(xdrDesc *d, int col, double lwd) {
@@ -264,7 +322,7 @@ static void Xdr_Rect(double x0, double y0, double x1, double y1,
   fprintf(d->out, "<xdr:spPr>");
   xfrm(d, x0, y0, x1, y1);
   fprintf(d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
-  fill_props(d, gc->fill);
+  fill_props_gc(d, gc);
   line_props(d, gc->col, gc->lwd);
   fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
 }
@@ -276,7 +334,7 @@ static void Xdr_Circle(double x, double y, double r, const pGEcontext gc, pDevDe
   fprintf(d->out, "<xdr:spPr>");
   xfrm(d, x - r, y - r, x + r, y + r);
   fprintf(d->out, "<a:prstGeom prst=\"ellipse\"><a:avLst/></a:prstGeom>");
-  fill_props(d, gc->fill);
+  fill_props_gc(d, gc);
   line_props(d, gc->col, gc->lwd);
   fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
 }
@@ -323,7 +381,7 @@ static void Xdr_Polygon(int n, double *x, double *y, const pGEcontext gc, pDevDe
   double w_emu = fabs(x1 - x0) * PT_TO_EMU;
   double h_emu = fabs(y1 - y0) * PT_TO_EMU;
   points_to_pts(d, x, y, n, x_min, y_min, w_emu, h_emu, TRUE);
-  fill_props(d, gc->fill);
+  fill_props_gc(d, gc);
   line_props(d, gc->col, gc->lwd);
   fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
 }
@@ -372,7 +430,7 @@ static void Xdr_Path(double *x, double *y, int npoly, int *nper,
     idx += n;
   }
   fprintf(d->out, "</a:pathLst></a:custGeom>");
-  fill_props(d, gc->fill);
+  fill_props_gc(d, gc);
   line_props(d, gc->col, gc->lwd);
   fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
 }
@@ -457,8 +515,8 @@ static void Xdr_Text(double x, double y, const char *str, double rot,
 }
 
 static SEXP Xdr_SetPattern(SEXP pattern, pDevDesc dd) {
-  (void) pattern; (void) dd;
-  return R_NilValue;
+  (void) dd;
+  return pattern;
 }
 
 static void Xdr_ReleasePattern(SEXP ref, pDevDesc dd) {
