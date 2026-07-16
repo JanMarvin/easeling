@@ -130,16 +130,55 @@ static void fill_props_gc(xdrDesc *d, const pGEcontext gc) {
   fill_props(d, gc->fill);
 }
 
-static void line_props(xdrDesc *d, int col, double lwd) {
-  if (col == NA_INTEGER || R_TRANSPARENT(col)) {
-    fprintf(d->out, "<a:ln><a:noFill/></a:ln>");
-  } else {
-    double w_emu = (lwd > 0 ? lwd : 1.0) * 0.75 * PT_TO_EMU;
-    int alpha = (int)(R_ALPHA(col) / 255.0 * 100000.0);
-    fprintf(d->out,
-            "<a:ln w=\"%.0f\"><a:solidFill><a:srgbClr val=\"%06X\"><a:alpha val=\"%d\"/></a:srgbClr></a:solidFill></a:ln>",
-            w_emu, rgb_hex(col), alpha);
+/* R lty encoding: nibble-packed integers.
+ LTY_SOLID=0 (no nibbles), others pack up to 8 nibbles of alternating on/off lengths.
+ From GraphicsEngine.h:
+ LTY_DASHED   = 4 + (4<<4)
+ LTY_DOTTED   = 1 + (3<<4)
+ LTY_DOTDASH  = 1 + (3<<4) + (4<<8) + (3<<12)
+ LTY_LONGDASH = 7 + (3<<4)
+ LTY_TWODASH  = 2 + (2<<4) + (6<<8) + (2<<12)
+ We match named presets first to get nicer OOXML, then fall through to custDash. */
+static void emit_dash(FILE *out, int lty, double lwd) {
+  (void) lwd;
+  if (lty == LTY_SOLID) return;
+  if (lty == LTY_DASHED)   { fprintf(out, "<a:prstDash val=\"dash\"/>");      return; }
+  if (lty == LTY_DOTTED)   { fprintf(out, "<a:prstDash val=\"dot\"/>");       return; }
+  if (lty == LTY_DOTDASH)  { fprintf(out, "<a:prstDash val=\"dashDot\"/>");   return; }
+  if (lty == LTY_LONGDASH) { fprintf(out, "<a:prstDash val=\"lgDash\"/>");    return; }
+  if (lty == LTY_TWODASH)  { fprintf(out, "<a:prstDash val=\"lgDashDot\"/>"); return; }
+
+  /* Custom: extract nibbles, emit custDash. OOXML <a:ds d= sp=> in units of 1/1000 lwd. */
+  unsigned int u = (unsigned int) lty;
+  int nib[8];
+  int count = 0;
+  for (int i = 0; i < 8; i++) {
+    nib[i] = (int)((u >> (i * 4)) & 0xF);
+    if (nib[i] != 0) count = i + 1;
   }
+  if (count < 2) count = 2;
+  if (count & 1) count++;
+  fprintf(out, "<a:custDash>");
+  for (int i = 0; i + 1 < count; i += 2) {
+    int d_val  = nib[i]   > 0 ? nib[i]   * 1000 : 1000;
+    int sp_val = nib[i+1] > 0 ? nib[i+1] * 1000 : 1000;
+    fprintf(out, "<a:ds d=\"%d\" sp=\"%d\"/>", d_val, sp_val);
+  }
+  fprintf(out, "</a:custDash>");
+}
+
+static void line_props(xdrDesc *d, int col, double lwd, int lty) {
+  if (col == NA_INTEGER || R_TRANSPARENT(col) || lty == LTY_BLANK) {
+    fprintf(d->out, "<a:ln><a:noFill/></a:ln>");
+    return;
+  }
+  double w_emu = (lwd > 0 ? lwd : 1.0) * 0.75 * PT_TO_EMU;
+  int alpha = (int)(R_ALPHA(col) / 255.0 * 100000.0);
+  fprintf(d->out,
+          "<a:ln w=\"%.0f\"><a:solidFill><a:srgbClr val=\"%06X\"><a:alpha val=\"%d\"/></a:srgbClr></a:solidFill>",
+          w_emu, rgb_hex(col), alpha);
+  emit_dash(d->out, lty, lwd);
+  fprintf(d->out, "</a:ln>");
 }
 
 static void points_to_pts(xdrDesc *d, double *x, double *y, int n,
@@ -304,7 +343,7 @@ static void Xdr_Line(double x1, double y1, double x2, double y2,
   double pts_x[2] = {x1, x2};
   double pts_y[2] = {y1, y2};
   points_to_pts(d, pts_x, pts_y, 2, x_min, y_min, w_emu, h_emu, FALSE);
-  line_props(d, gc->col, gc->lwd);
+  line_props(d, gc->col, gc->lwd, gc->lty);
   fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
 }
 
@@ -317,7 +356,7 @@ static void Xdr_Rect(double x0, double y0, double x1, double y1,
   xfrm(d, x0, y0, x1, y1);
   fprintf(d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
   fill_props_gc(d, gc);
-  line_props(d, gc->col, gc->lwd);
+  line_props(d, gc->col, gc->lwd, gc->lty);
   fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
 }
 
@@ -329,7 +368,7 @@ static void Xdr_Circle(double x, double y, double r, const pGEcontext gc, pDevDe
   xfrm(d, x - r, y - r, x + r, y + r);
   fprintf(d->out, "<a:prstGeom prst=\"ellipse\"><a:avLst/></a:prstGeom>");
   fill_props_gc(d, gc);
-  line_props(d, gc->col, gc->lwd);
+  line_props(d, gc->col, gc->lwd, gc->lty);
   fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
 }
 
@@ -358,7 +397,7 @@ static void Xdr_Polyline(int n, double *x, double *y, const pGEcontext gc, pDevD
   double h_emu = fabs(y1 - y0) * PT_TO_EMU;
   points_to_pts(d, x, y, n, x_min, y_min, w_emu, h_emu, FALSE);
   fprintf(d->out, "<a:noFill/>");
-  line_props(d, gc->col, gc->lwd);
+  line_props(d, gc->col, gc->lwd, gc->lty);
   fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
 }
 
@@ -376,7 +415,7 @@ static void Xdr_Polygon(int n, double *x, double *y, const pGEcontext gc, pDevDe
   double h_emu = fabs(y1 - y0) * PT_TO_EMU;
   points_to_pts(d, x, y, n, x_min, y_min, w_emu, h_emu, TRUE);
   fill_props_gc(d, gc);
-  line_props(d, gc->col, gc->lwd);
+  line_props(d, gc->col, gc->lwd, gc->lty);
   fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
 }
 
@@ -425,7 +464,7 @@ static void Xdr_Path(double *x, double *y, int npoly, int *nper,
   }
   fprintf(d->out, "</a:pathLst></a:custGeom>");
   fill_props_gc(d, gc);
-  line_props(d, gc->col, gc->lwd);
+  line_props(d, gc->col, gc->lwd, gc->lty);
   fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
 }
 
@@ -536,7 +575,7 @@ static void Xdr_ReleaseMask(SEXP ref, pDevDesc dd) {
 }
 
 SEXP easeling_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
-              SEXP fontname_, SEXP underline_, SEXP strikeout_) {
+               SEXP fontname_, SEXP underline_, SEXP strikeout_) {
   const char *path = CHAR(STRING_ELT(path_, 0));
   double width  = REAL(width_)[0];
   double height = REAL(height_)[0];

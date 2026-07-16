@@ -10,9 +10,11 @@ expect_wellformed_fragment <- function(file) {
   if (requireNamespace("openxlsx2", quietly = TRUE)) {
     testthat::expect_error(openxlsx2::read_xml(wrapped), NA)
   } else {
-    # fallback: crude open/close tag balance check
-    opens <- lengths(regmatches(wrapped, gregexpr("<[a-zA-Z:]+[^/>]*(?<!/)>", wrapped, perl = TRUE)))
-    closes <- lengths(regmatches(wrapped, gregexpr("</[a-zA-Z:]+>", wrapped, perl = TRUE)))
+    # fallback: count open vs close tags.
+    # Remove self-closing tags first, then compare open/close counts.
+    no_self <- gsub("<[^>]+/>", "", wrapped)
+    opens  <- lengths(regmatches(no_self, gregexpr("<[a-zA-Z][a-zA-Z0-9:]*(?:\\s[^>]*)?>", no_self, perl = TRUE)))
+    closes <- lengths(regmatches(no_self, gregexpr("</[a-zA-Z][a-zA-Z0-9:]*>", no_self)))
     testthat::expect_equal(opens, closes)
   }
 }
@@ -356,4 +358,84 @@ test_that("output is accepted by openxlsx2::wb_add_drawing when available", {
   wb <- openxlsx2::wb_workbook()
   wb$add_worksheet()
   expect_error(wb$add_drawing(xml = f, dims = "A1"), NA)
+})
+
+# Line types (lty) -----------------------------------------------------------
+
+test_that("lty=1 (solid) emits no dash element", {
+  f <- easel_dev(width = 3, height = 3)
+  plot.new()
+  abline(h = 0.5, lty = 1)
+  dev.off()
+  txt <- read_xml_text(f)
+  expect_false(grepl("prstDash", txt))
+  expect_false(grepl("custDash", txt))
+})
+
+test_that("lty=2 (dashed) emits prstDash val=dash", {
+  f <- easel_dev(width = 3, height = 3)
+  plot.new()
+  abline(h = 0.5, lty = 2)
+  dev.off()
+  expect_match(read_xml_text(f), 'val="dash"')
+})
+
+test_that("lty=3 (dotted) emits prstDash val=dot", {
+  f <- easel_dev(width = 3, height = 3)
+  plot.new()
+  abline(h = 0.5, lty = 3)
+  dev.off()
+  expect_match(read_xml_text(f), 'val="dot"')
+})
+
+test_that("lty=4 (dotdash) emits prstDash val=dashDot", {
+  f <- easel_dev(width = 3, height = 3)
+  plot.new()
+  abline(h = 0.5, lty = 4)
+  dev.off()
+  expect_match(read_xml_text(f), 'val="dashDot"')
+})
+
+test_that("lty=5 (longdash) emits prstDash val=lgDash", {
+  f <- easel_dev(width = 3, height = 3)
+  plot.new()
+  abline(h = 0.5, lty = 5)
+  dev.off()
+  expect_match(read_xml_text(f), 'val="lgDash"')
+})
+
+test_that("lty=6 (twodash) emits prstDash val=lgDashDot", {
+  f <- easel_dev(width = 3, height = 3)
+  plot.new()
+  abline(h = 0.5, lty = 6)
+  dev.off()
+  expect_match(read_xml_text(f), 'val="lgDashDot"')
+})
+
+test_that("custom lty string emits custDash with correct ds elements", {
+  f <- easel_dev(width = 3, height = 3)
+  plot.new()
+  # "1348": on=1, off=3, on=4, off=8 -> two <a:ds> pairs
+  lines(c(0.1, 0.9), c(0.5, 0.5), lty = "1348")
+  dev.off()
+  txt <- read_xml_text(f)
+  expect_match(txt, "<a:custDash>")
+  expect_match(txt, 'd="1000"')
+  expect_match(txt, 'sp="3000"')
+  expect_match(txt, 'd="4000"')
+  expect_match(txt, 'sp="8000"')
+  expect_equal(count_matches(f, "<a:ds "), 2)
+})
+
+test_that("all six named lty values produce distinct dash styles", {
+  patterns <- c('val="dash"', 'val="dot"', 'val="dashDot"',
+                'val="lgDash"', 'val="lgDashDot"')
+  for (lty_i in 2:6) {
+    f <- easel_dev(width = 3, height = 3)
+    plot.new()
+    abline(h = 0.5, lty = lty_i)
+    dev.off()
+    expect_match(read_xml_text(f), patterns[lty_i - 1],
+                 label = paste("lty =", lty_i))
+  }
 })
