@@ -450,11 +450,12 @@ test_that("all six named lty values produce distinct dash styles", {
 # internally — so we're checking that the device agrees with R, not with
 # hard-coded numbers.
 
-PT_TO_EMU <- 12700
+pt_to_emu <- 12700
 
 clip_bounds_in <- function() {
-  plt <- par("plt"); fin <- par("fin")
-  c(x0 = plt[1] * fin[1],       x1 = plt[2] * fin[1],
+  plt <- par("plt")
+  fin <- par("fin")
+  c(x0 = plt[1] * fin[1], x1 = plt[2] * fin[1],
     y0 = (1 - plt[4]) * fin[2], y1 = (1 - plt[3]) * fin[2])
 }
 
@@ -463,11 +464,11 @@ data_shape_bboxes <- function(f, dev_w, dev_h) {
   txt  <- read_xml_text(f)
   offs <- regmatches(txt, gregexpr('<a:off x="[^"]*" y="[^"]*"',  txt))[[1]]
   exts <- regmatches(txt, gregexpr('<a:ext cx="[^"]*" cy="[^"]*"', txt))[[1]]
-  gn   <- function(tags, a) as.numeric(sub(paste0('.*', a, '="([^"]*)".*'), "\\1", tags))
-  ox <- gn(offs, "x") / PT_TO_EMU / 72
-  oy <- gn(offs, "y") / PT_TO_EMU / 72
-  cw <- gn(exts, "cx") / PT_TO_EMU / 72
-  ch <- gn(exts, "cy") / PT_TO_EMU / 72
+  gn   <- function(tags, a) as.numeric(sub(paste0(".*", a, "=\"([^\"]*)\".*"), "\\1", tags))
+  ox <- gn(offs, "x") / pt_to_emu / 72
+  oy <- gn(offs, "y") / pt_to_emu / 72
+  cw <- gn(exts, "cx") / pt_to_emu / 72
+  ch <- gn(exts, "cy") / pt_to_emu / 72
   bb <- data.frame(x0 = ox, x1 = ox + cw, y0 = oy, y1 = oy + ch)
   # Background rect spans full device; exclude it
   is_bg <- abs(bb$x0) < 1e-4 & abs(bb$y0) < 1e-4 &
@@ -476,34 +477,37 @@ data_shape_bboxes <- function(f, dev_w, dev_h) {
 }
 
 test_that("line crossing right boundary is clipped to par() plot region", {
-  W <- 4; H <- 3
-  f <- easel_dev(width = W, height = H)
+  w <- 4
+  h <- 3
+  f <- easel_dev(width = w, height = h)
   plot.new()
   clip <- clip_bounds_in()
   lines(c(0.5, 5.0), c(0.5, 0.5))   # x=5 is far outside [0,1] user space
   dev.off()
 
-  bb <- data_shape_bboxes(f, W, H)
+  bb <- data_shape_bboxes(f, w, h)
   expect_equal(nrow(bb), 1, label = "exactly one clipped line segment")
-  tol <- 1 / PT_TO_EMU / 72
+  tol <- 1 / pt_to_emu / 72
   expect_lte(bb$x1, clip["x1"] + tol)
   expect_gte(bb$x0, clip["x0"] - tol)
 })
 
 test_that("line entirely outside plot region produces no shapes", {
-  W <- 4; H <- 3
-  f <- easel_dev(width = W, height = H)
+  w <- 4
+  h <- 3
+  f <- easel_dev(width = w, height = h)
   plot.new()
   lines(c(5.0, 8.0), c(0.5, 0.5))   # entirely right of [0,1]
   dev.off()
 
-  bb <- data_shape_bboxes(f, W, H)
+  bb <- data_shape_bboxes(f, w, h)
   expect_equal(nrow(bb), 0, label = "no shapes for line outside clip")
 })
 
 test_that("rect clipped to par() plot region right boundary", {
-  W <- 4; H <- 3
-  f <- easel_dev(width = W, height = H)
+  w <- 4
+  h <- 3
+  f <- easel_dev(width = w, height = h)
   plot.new()
   clip <- clip_bounds_in()
   rect(0.5, 0.2, 3.0, 0.8)   # right edge at x=3 is outside [0,1]
@@ -511,35 +515,37 @@ test_that("rect clipped to par() plot region right boundary", {
 
   # Note: OOXML rects always draw all four borders; the clipped edge will have
   # a border unlike R's own devices. The fill area is correctly clipped.
-  bb <- data_shape_bboxes(f, W, H)
+  bb <- data_shape_bboxes(f, w, h)
   expect_equal(nrow(bb), 1)
-  tol <- 1 / PT_TO_EMU / 72
+  tol <- 1 / pt_to_emu / 72
   expect_lte(bb$x1, clip["x1"] + tol)
 })
 
 test_that("rect entirely outside plot region produces no shapes", {
-  W <- 4; H <- 3
-  f <- easel_dev(width = W, height = H)
+  w <- 4
+  h <- 3
+  f <- easel_dev(width = w, height = h)
   plot.new()
   rect(2.0, 0.2, 3.0, 0.8)
   dev.off()
 
-  bb <- data_shape_bboxes(f, W, H)
+  bb <- data_shape_bboxes(f, w, h)
   expect_equal(nrow(bb), 0)
 })
 
 test_that("polygon clipped by S-H stays within par() plot region on all sides", {
-  W <- 4; H <- 3
-  f <- easel_dev(width = W, height = H)
+  w <- 4
+  h <- 3
+  f <- easel_dev(width = w, height = h)
   plot.new()
   clip <- clip_bounds_in()
   # Triangle with one vertex outside on each axis
   polygon(c(0.5, 5.0, 0.5), c(-2.0, 0.5, 3.0), col = "blue")
   dev.off()
 
-  bb <- data_shape_bboxes(f, W, H)
+  bb <- data_shape_bboxes(f, w, h)
   expect_gte(nrow(bb), 1, label = "polygon partially in clip region survives")
-  tol <- 1 / PT_TO_EMU / 72
+  tol <- 1 / pt_to_emu / 72
   expect_true(all(bb$x0 >= clip["x0"] - tol))
   expect_true(all(bb$x1 <= clip["x1"] + tol))
   expect_true(all(bb$y0 >= clip["y0"] - tol))
@@ -547,28 +553,30 @@ test_that("polygon clipped by S-H stays within par() plot region on all sides", 
 })
 
 test_that("polygon entirely outside plot region produces no shapes", {
-  W <- 4; H <- 3
-  f <- easel_dev(width = W, height = H)
+  w <- 4
+  h <- 3
+  f <- easel_dev(width = w, height = h)
   plot.new()
   polygon(c(3, 5, 4), c(0.3, 0.3, 0.8), col = "red")  # entirely right of [0,1]
   dev.off()
 
-  bb <- data_shape_bboxes(f, W, H)
+  bb <- data_shape_bboxes(f, w, h)
   expect_equal(nrow(bb), 0)
 })
 
 test_that("polyline crossing boundary is split and all segments stay within clip", {
-  W <- 4; H <- 3
-  f <- easel_dev(width = W, height = H)
+  w <- 4
+  h <- 3
+  f <- easel_dev(width = w, height = h)
   plot.new()
   clip <- clip_bounds_in()
   # Exits left, enters, exits right: segments 1 and 3 clip, segment 2 is fully inside
   lines(c(-1.0, 0.3, 0.7, 2.0), c(0.5, 0.5, 0.5, 0.5))
   dev.off()
 
-  bb <- data_shape_bboxes(f, W, H)
+  bb <- data_shape_bboxes(f, w, h)
   expect_gte(nrow(bb), 1)
-  tol <- 1 / PT_TO_EMU / 72
+  tol <- 1 / pt_to_emu / 72
   expect_true(all(bb$x0 >= clip["x0"] - tol))
   expect_true(all(bb$x1 <= clip["x1"] + tol))
 })
