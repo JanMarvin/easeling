@@ -211,6 +211,80 @@ static Rboolean fully_outside_clip(xdrDesc *d, double x0, double y0, double x1, 
   return (bx1 < cx0 || bx0 > cx1 || by1 < cy0 || by0 > cy1) ? TRUE : FALSE;
 }
 
+/* Liang-Barsky line clipping. Returns FALSE if the segment is entirely
+ outside. On TRUE, (x1,y1)-(x2,y2) are updated to the clipped endpoints. */
+static Rboolean clip_line_lb(double cx0, double cy0, double cx1, double cy1,
+                             double *x1, double *y1, double *x2, double *y2) {
+  double dx = *x2 - *x1;
+  double dy = *y2 - *y1;
+  double t0 = 0.0, t1 = 1.0;
+  double p[4], q[4];
+  p[0] = -dx; q[0] = *x1 - cx0;
+  p[1] =  dx; q[1] = cx1 - *x1;
+  p[2] = -dy; q[2] = *y1 - cy0;
+  p[3] =  dy; q[3] = cy1 - *y1;
+  for (int i = 0; i < 4; i++) {
+    if (p[i] == 0.0) {
+      if (q[i] < 0.0) return FALSE;
+    } else {
+      double r = q[i] / p[i];
+      if (p[i] < 0.0) { if (r > t0) t0 = r; }
+      else             { if (r < t1) t1 = r; }
+    }
+  }
+  if (t0 > t1) return FALSE;
+  double nx1 = *x1 + t0 * dx, ny1 = *y1 + t0 * dy;
+  double nx2 = *x1 + t1 * dx, ny2 = *y1 + t1 * dy;
+  *x1 = nx1; *y1 = ny1; *x2 = nx2; *y2 = ny2;
+  return TRUE;
+}
+
+/* Sutherland-Hodgman polygon clipping against one axis-aligned half-plane.
+ out must have capacity >= 2*n. Returns number of output vertices. */
+static int sh_clip_edge(const double *ix, const double *iy, int n,
+                        double *ox, double *oy,
+                        int axis, int sign, double bound) {
+  /* axis=0 -> x, axis=1 -> y; sign=+1 -> keep >= bound, sign=-1 -> keep <= bound */
+  int m = 0;
+  for (int i = 0; i < n; i++) {
+    int j = (i + 1) % n;
+    double aval = (axis == 0) ? ix[i] : iy[i];
+    double bval = (axis == 0) ? ix[j] : iy[j];
+    int a_in = (sign > 0) ? (aval >= bound) : (aval <= bound);
+    int b_in = (sign > 0) ? (bval >= bound) : (bval <= bound);
+    if (a_in) { ox[m] = ix[i]; oy[m] = iy[i]; m++; }
+    if (a_in != b_in) {
+      double t = (bound - aval) / (bval - aval);
+      ox[m] = ix[i] + t * (ix[j] - ix[i]);
+      oy[m] = iy[i] + t * (iy[j] - iy[i]);
+      m++;
+    }
+  }
+  return m;
+}
+
+/* Clip a polygon ring against the axis-aligned clip rectangle.
+ buf1/buf2 are scratch buffers each of size >= 2*n.
+ Returns number of output vertices in ox/oy (pointing into buf1 or buf2). */
+static int clip_polygon_sh(const double *x, const double *y, int n,
+                           double cx0, double cy0, double cx1, double cy1,
+                           double *buf1x, double *buf1y,
+                           double *buf2x, double *buf2y,
+                           double **ox, double **oy) {
+  /* copy input into buf1 */
+  for (int i = 0; i < n; i++) { buf1x[i] = x[i]; buf1y[i] = y[i]; }
+  int m = n;
+  m = sh_clip_edge(buf1x, buf1y, m, buf2x, buf2y, 0, +1, cx0); /* x >= cx0 */
+  if (m == 0) { *ox = buf2x; *oy = buf2y; return 0; }
+  m = sh_clip_edge(buf2x, buf2y, m, buf1x, buf1y, 0, -1, cx1); /* x <= cx1 */
+  if (m == 0) { *ox = buf1x; *oy = buf1y; return 0; }
+  m = sh_clip_edge(buf1x, buf1y, m, buf2x, buf2y, 1, +1, cy0); /* y >= cy0 */
+  if (m == 0) { *ox = buf2x; *oy = buf2y; return 0; }
+  m = sh_clip_edge(buf2x, buf2y, m, buf1x, buf1y, 1, -1, cy1); /* y <= cy1 */
+  *ox = buf1x; *oy = buf1y;
+  return m;
+}
+
 static void Xdr_Raster(unsigned int *raster, int w, int h,
                        double x, double y, double width, double height,
                        double rot, Rboolean interpolate,
@@ -332,7 +406,9 @@ static void Xdr_MetricInfo(int c, const pGEcontext gc, double *ascent,
 static void Xdr_Line(double x1, double y1, double x2, double y2,
                      const pGEcontext gc, pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
-  if (fully_outside_clip(d, x1, y1, x2, y2)) return;
+  double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
+  double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
+  if (!clip_line_lb(cx0, cy0, cx1, cy1, &x1, &y1, &x2, &y2)) return;
   sp_open(d, "");
   fprintf(d->out, "<xdr:spPr>");
   xfrm(d, x1, y1, x2, y2);
@@ -350,10 +426,14 @@ static void Xdr_Line(double x1, double y1, double x2, double y2,
 static void Xdr_Rect(double x0, double y0, double x1, double y1,
                      const pGEcontext gc, pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
-  if (fully_outside_clip(d, x0, y0, x1, y1)) return;
+  double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
+  double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
+  double rx0 = fmax(fmin(x0, x1), cx0), rx1 = fmin(fmax(x0, x1), cx1);
+  double ry0 = fmax(fmin(y0, y1), cy0), ry1 = fmin(fmax(y0, y1), cy1);
+  if (rx1 <= rx0 || ry1 <= ry0) return;
   sp_open(d, "");
   fprintf(d->out, "<xdr:spPr>");
-  xfrm(d, x0, y0, x1, y1);
+  xfrm(d, rx0, ry0, rx1, ry1);
   fprintf(d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
   fill_props_gc(d, gc);
   line_props(d, gc->col, gc->lwd, gc->lty);
@@ -385,27 +465,49 @@ static void bbox(double *x, double *y, int n, double *x0, double *y0,
 
 static void Xdr_Polyline(int n, double *x, double *y, const pGEcontext gc, pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
-  double x0, y0, x1, y1;
-  bbox(x, y, n, &x0, &y0, &x1, &y1);
-  if (fully_outside_clip(d, x0, y0, x1, y1)) return;
-  sp_open(d, "");
-  fprintf(d->out, "<xdr:spPr>");
-  xfrm(d, x0, y0, x1, y1);
-  double x_min = fmin(x0, x1) * PT_TO_EMU;
-  double y_min = fmin(y0, y1) * PT_TO_EMU;
-  double w_emu = fabs(x1 - x0) * PT_TO_EMU;
-  double h_emu = fabs(y1 - y0) * PT_TO_EMU;
-  points_to_pts(d, x, y, n, x_min, y_min, w_emu, h_emu, FALSE);
-  fprintf(d->out, "<a:noFill/>");
-  line_props(d, gc->col, gc->lwd, gc->lty);
-  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
+  double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
+  double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
+
+  /* Emit each clipped segment as a separate shape. Segments that vanish after
+   clipping are skipped. Consecutive visible segments could be merged but the
+   complexity is not worth it — polylines in R plots rarely have >100 points. */
+  for (int i = 0; i < n - 1; i++) {
+    double ax = x[i], ay = y[i], bx = x[i + 1], by = y[i + 1];
+    if (!clip_line_lb(cx0, cy0, cx1, cy1, &ax, &ay, &bx, &by)) continue;
+    sp_open(d, "");
+    fprintf(d->out, "<xdr:spPr>");
+    xfrm(d, ax, ay, bx, by);
+    double x_min = fmin(ax, bx) * PT_TO_EMU;
+    double y_min = fmin(ay, by) * PT_TO_EMU;
+    double w_emu = fabs(bx - ax) * PT_TO_EMU;
+    double h_emu = fabs(by - ay) * PT_TO_EMU;
+    double pts_x[2] = {ax, bx};
+    double pts_y[2] = {ay, by};
+    points_to_pts(d, pts_x, pts_y, 2, x_min, y_min, w_emu, h_emu, FALSE);
+    fprintf(d->out, "<a:noFill/>");
+    line_props(d, gc->col, gc->lwd, gc->lty);
+    fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
+  }
 }
 
 static void Xdr_Polygon(int n, double *x, double *y, const pGEcontext gc, pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
+  double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
+
+  /* Sutherland-Hodgman: output may have up to n+4 vertices per clip edge, 4 edges. */
+  int cap = (n + 4) * 4;
+  double *buf1x = (double *) R_alloc((size_t) cap, sizeof(double));
+  double *buf1y = (double *) R_alloc((size_t) cap, sizeof(double));
+  double *buf2x = (double *) R_alloc((size_t) cap, sizeof(double));
+  double *buf2y = (double *) R_alloc((size_t) cap, sizeof(double));
+  double *ox, *oy;
+  int m = clip_polygon_sh(x, y, n, cx0, cy0, cx1, cy1,
+                          buf1x, buf1y, buf2x, buf2y, &ox, &oy);
+  if (m < 2) return;
+
   double x0, y0, x1, y1;
-  bbox(x, y, n, &x0, &y0, &x1, &y1);
-  if (fully_outside_clip(d, x0, y0, x1, y1)) return;
+  bbox(ox, oy, m, &x0, &y0, &x1, &y1);
   sp_open(d, "");
   fprintf(d->out, "<xdr:spPr>");
   xfrm(d, x0, y0, x1, y1);
@@ -413,7 +515,7 @@ static void Xdr_Polygon(int n, double *x, double *y, const pGEcontext gc, pDevDe
   double y_min = fmin(y0, y1) * PT_TO_EMU;
   double w_emu = fabs(x1 - x0) * PT_TO_EMU;
   double h_emu = fabs(y1 - y0) * PT_TO_EMU;
-  points_to_pts(d, x, y, n, x_min, y_min, w_emu, h_emu, TRUE);
+  points_to_pts(d, ox, oy, m, x_min, y_min, w_emu, h_emu, TRUE);
   fill_props_gc(d, gc);
   line_props(d, gc->col, gc->lwd, gc->lty);
   fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
@@ -429,38 +531,73 @@ static void Xdr_Path(double *x, double *y, int npoly, int *nper,
   for (int k = 0; k < npoly; k++) total += nper[k];
   if (total < 2) return;
 
-  double x0, y0, x1, y1;
-  bbox(x, y, total, &x0, &y0, &x1, &y1);
-  if (fully_outside_clip(d, x0, y0, x1, y1)) return;
+  double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
+  double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
 
-  double x_min = fmin(x0, x1) * PT_TO_EMU;
-  double y_min = fmin(y0, y1) * PT_TO_EMU;
-  double w_emu = fabs(x1 - x0) * PT_TO_EMU;
-  double h_emu = fabs(y1 - y0) * PT_TO_EMU;
+  /* Clip each ring and collect surviving vertices to compute the global bbox. */
+  int max_ring = 0;
+  for (int k = 0; k < npoly; k++) if (nper[k] > max_ring) max_ring = nper[k];
+  int cap = (max_ring + 4) * 4;
+  double *buf1x = (double *) R_alloc((size_t) cap, sizeof(double));
+  double *buf1y = (double *) R_alloc((size_t) cap, sizeof(double));
+  double *buf2x = (double *) R_alloc((size_t) cap, sizeof(double));
+  double *buf2y = (double *) R_alloc((size_t) cap, sizeof(double));
+
+  /* clipped ring storage: at most cap vertices per ring, npoly rings */
+  double *crx = (double *) R_alloc((size_t)(cap * npoly), sizeof(double));
+  double *cry = (double *) R_alloc((size_t)(cap * npoly), sizeof(double));
+  int    *crn = (int *)    R_alloc((size_t) npoly, sizeof(int));
+
+  int idx = 0, any = 0;
+  double gx0 = R_PosInf, gy0 = R_PosInf, gx1 = R_NegInf, gy1 = R_NegInf;
+  for (int k = 0; k < npoly; k++) {
+    double *ox, *oy;
+    int m = clip_polygon_sh(x + idx, y + idx, nper[k],
+                            cx0, cy0, cx1, cy1,
+                            buf1x, buf1y, buf2x, buf2y, &ox, &oy);
+    crn[k] = m;
+    if (m >= 2) {
+      for (int i = 0; i < m; i++) {
+        crx[k * cap + i] = ox[i];
+        cry[k * cap + i] = oy[i];
+        if (ox[i] < gx0) gx0 = ox[i];
+        if (ox[i] > gx1) gx1 = ox[i];
+        if (oy[i] < gy0) gy0 = oy[i];
+        if (oy[i] > gy1) gy1 = oy[i];
+      }
+      any = 1;
+    }
+    idx += nper[k];
+  }
+  if (!any) return;
+
+  double x_min = gx0 * PT_TO_EMU;
+  double y_min = gy0 * PT_TO_EMU;
+  double w_emu = (gx1 - gx0) * PT_TO_EMU;
+  double h_emu = (gy1 - gy0) * PT_TO_EMU;
   double w_or1 = w_emu <= 0 ? 1.0 : w_emu;
   double h_or1 = h_emu <= 0 ? 1.0 : h_emu;
 
   sp_open(d, "");
   fprintf(d->out, "<xdr:spPr>");
-  xfrm(d, x0, y0, x1, y1);
+  xfrm(d, gx0, gy0, gx1, gy1);
   fprintf(d->out,
           "<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/>"
           "<a:rect l=\"0\" t=\"0\" r=\"%.0f\" b=\"%.0f\"/><a:pathLst>",
             w_or1, h_or1);
 
-  int idx = 0;
   for (int k = 0; k < npoly; k++) {
-    int n = nper[k];
+    int m = crn[k];
+    if (m < 2) continue;
     fprintf(d->out, "<a:path w=\"%.0f\" h=\"%.0f\">", w_or1, h_or1);
-    for (int i = 0; i < n; i++) {
-      double px = x[idx + i] * PT_TO_EMU - x_min;
-      double py = y[idx + i] * PT_TO_EMU - y_min;
+    for (int i = 0; i < m; i++) {
+      double px = crx[k * cap + i] * PT_TO_EMU - x_min;
+      double py = cry[k * cap + i] * PT_TO_EMU - y_min;
       fprintf(d->out, "<a:%s><a:pt x=\"%.0f\" y=\"%.0f\"/></a:%s>",
               i == 0 ? "moveTo" : "lnTo", px, py,
               i == 0 ? "moveTo" : "lnTo");
     }
     fprintf(d->out, "<a:close/></a:path>");
-    idx += n;
   }
   fprintf(d->out, "</a:pathLst></a:custGeom>");
   fill_props_gc(d, gc);
