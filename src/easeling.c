@@ -523,6 +523,8 @@ static void Xdr_Polygon(int n, double *x, double *y, const pGEcontext gc, pDevDe
 
 static void Xdr_Path(double *x, double *y, int npoly, int *nper,
                      Rboolean winding, const pGEcontext gc, pDevDesc dd) {
+  /* DrawingML custGeom has no evenodd fill rule; all paths use nonzero winding.
+   Both R fill rules produce the same output — acceptable given the format limit. */
   (void) winding;
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   if (npoly < 1) return;
