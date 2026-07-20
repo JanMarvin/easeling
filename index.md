@@ -7,6 +7,18 @@ No Cairo, FreeType, fontconfig, or xml2 dependency.
 
 ## Install
 
+You can install development versions via r-universe:
+
+``` r
+
+install.packages(
+  "easeling",
+  repos = c("https://janmarvin.r-universe.dev", "https://cloud.r-project.org")
+)
+```
+
+Or from GitHub directly:
+
 ``` r
 
 # install.packages("remotes")
