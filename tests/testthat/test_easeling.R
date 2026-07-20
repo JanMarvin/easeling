@@ -440,9 +440,6 @@ test_that("all six named lty values produce distinct dash styles", {
   }
 })
 
-
-
-
 # Geometry clipping ----------------------------------------------------------
 # Each test uses plot.new() (no axes, no decorations) so the only shapes in
 # the XML beyond the background rect are what the test explicitly draws.
@@ -579,4 +576,62 @@ test_that("polyline crossing boundary is split and all segments stay within clip
   tol <- 1 / pt_to_emu / 72
   expect_true(all(bb$x0 >= clip["x0"] - tol))
   expect_true(all(bb$x1 <= clip["x1"] + tol))
+})
+
+# Line cap and join ----------------------------------------------------------
+
+test_that("round cap emits cap=rnd", {
+  f <- easel_dev(width = 3, height = 3)
+  plot.new()
+  op <- par(lend = "round"); on.exit(par(op))
+  lines(c(0.2, 0.8), c(0.5, 0.5), lwd = 4)
+  dev.off()
+  expect_match(read_xml_text(f), 'cap="rnd"')
+})
+
+test_that("butt cap emits cap=flat", {
+  f <- easel_dev(width = 3, height = 3)
+  plot.new()
+  op <- par(lend = "butt"); on.exit(par(op))
+  lines(c(0.2, 0.8), c(0.5, 0.5), lwd = 4)
+  dev.off()
+  expect_match(read_xml_text(f), 'cap="flat"')
+})
+
+test_that("square cap emits cap=sq", {
+  f <- easel_dev(width = 3, height = 3)
+  plot.new()
+  op <- par(lend = "square"); on.exit(par(op))
+  lines(c(0.2, 0.8), c(0.5, 0.5), lwd = 4)
+  dev.off()
+  expect_match(read_xml_text(f), 'cap="sq"')
+})
+
+test_that("round join emits a:round", {
+  f <- easel_dev(width = 3, height = 3)
+  plot.new()
+  op <- par(ljoin = "round"); on.exit(par(op))
+  lines(c(0.2, 0.5, 0.8), c(0.2, 0.8, 0.2), lwd = 4)
+  dev.off()
+  expect_match(read_xml_text(f), "<a:round/>")
+})
+
+test_that("bevel join emits a:bevel", {
+  f <- easel_dev(width = 3, height = 3)
+  plot.new()
+  op <- par(ljoin = "bevel"); on.exit(par(op))
+  lines(c(0.2, 0.5, 0.8), c(0.2, 0.8, 0.2), lwd = 4)
+  dev.off()
+  expect_match(read_xml_text(f), "<a:bevel/>")
+})
+
+test_that("mitre join emits a:miter with lim scaled from lmitre", {
+  f <- easel_dev(width = 3, height = 3)
+  plot.new()
+  op <- par(ljoin = "mitre", lmitre = 4); on.exit(par(op))
+  lines(c(0.2, 0.5, 0.8), c(0.2, 0.8, 0.2), lwd = 4)
+  dev.off()
+  txt <- read_xml_text(f)
+  expect_match(txt, "<a:miter")
+  expect_match(txt, 'lim="400000"')
 })

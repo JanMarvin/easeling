@@ -167,17 +167,37 @@ static void emit_dash(FILE *out, int lty, double lwd) {
   fprintf(out, "</a:custDash>");
 }
 
-static void line_props(xdrDesc *d, int col, double lwd, int lty) {
+static void line_props(xdrDesc *d, int col, double lwd, int lty, int lend, int ljoin, double lmitre) {
   if (col == NA_INTEGER || R_TRANSPARENT(col) || lty == LTY_BLANK) {
     fprintf(d->out, "<a:ln><a:noFill/></a:ln>");
     return;
   }
   double w_emu = (lwd > 0 ? lwd : 1.0) * 0.75 * PT_TO_EMU;
   int alpha = (int)(R_ALPHA(col) / 255.0 * 100000.0);
+
+  const char *cap;
+  switch (lend) {
+  case GE_ROUND_CAP:  cap = "rnd";  break;
+  case GE_BUTT_CAP:   cap = "flat"; break;
+  case GE_SQUARE_CAP: cap = "sq";   break;
+  default:            cap = "rnd";  break;
+  }
+
   fprintf(d->out,
-          "<a:ln w=\"%.0f\"><a:solidFill><a:srgbClr val=\"%06X\"><a:alpha val=\"%d\"/></a:srgbClr></a:solidFill>",
-          w_emu, rgb_hex(col), alpha);
+          "<a:ln w=\"%.0f\" cap=\"%s\"><a:solidFill><a:srgbClr val=\"%06X\"><a:alpha val=\"%d\"/></a:srgbClr></a:solidFill>",
+          w_emu, cap, rgb_hex(col), alpha);
   emit_dash(d->out, lty, lwd);
+
+  switch (ljoin) {
+  case GE_ROUND_JOIN: fprintf(d->out, "<a:round/>"); break;
+  case GE_BEVEL_JOIN: fprintf(d->out, "<a:bevel/>"); break;
+  case GE_MITRE_JOIN:
+    /* OOXML miter limit is 100ths of line width; R's lmitre is a ratio */
+    fprintf(d->out, "<a:miter lim=\"%.0f\"/>", lmitre * 100000.0);
+    break;
+  default: fprintf(d->out, "<a:round/>"); break;
+  }
+
   fprintf(d->out, "</a:ln>");
 }
 
@@ -419,7 +439,7 @@ static void Xdr_Line(double x1, double y1, double x2, double y2,
   double pts_x[2] = {x1, x2};
   double pts_y[2] = {y1, y2};
   points_to_pts(d, pts_x, pts_y, 2, x_min, y_min, w_emu, h_emu, FALSE);
-  line_props(d, gc->col, gc->lwd, gc->lty);
+  line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
   fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
 }
 
@@ -436,7 +456,7 @@ static void Xdr_Rect(double x0, double y0, double x1, double y1,
   xfrm(d, rx0, ry0, rx1, ry1);
   fprintf(d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
   fill_props_gc(d, gc);
-  line_props(d, gc->col, gc->lwd, gc->lty);
+  line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
   fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
 }
 
@@ -448,7 +468,7 @@ static void Xdr_Circle(double x, double y, double r, const pGEcontext gc, pDevDe
   xfrm(d, x - r, y - r, x + r, y + r);
   fprintf(d->out, "<a:prstGeom prst=\"ellipse\"><a:avLst/></a:prstGeom>");
   fill_props_gc(d, gc);
-  line_props(d, gc->col, gc->lwd, gc->lty);
+  line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
   fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
 }
 
@@ -485,7 +505,7 @@ static void Xdr_Polyline(int n, double *x, double *y, const pGEcontext gc, pDevD
     double pts_y[2] = {ay, by};
     points_to_pts(d, pts_x, pts_y, 2, x_min, y_min, w_emu, h_emu, FALSE);
     fprintf(d->out, "<a:noFill/>");
-    line_props(d, gc->col, gc->lwd, gc->lty);
+    line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
     fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
   }
 }
@@ -517,7 +537,7 @@ static void Xdr_Polygon(int n, double *x, double *y, const pGEcontext gc, pDevDe
   double h_emu = fabs(y1 - y0) * PT_TO_EMU;
   points_to_pts(d, ox, oy, m, x_min, y_min, w_emu, h_emu, TRUE);
   fill_props_gc(d, gc);
-  line_props(d, gc->col, gc->lwd, gc->lty);
+  line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
   fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
 }
 
@@ -603,7 +623,7 @@ static void Xdr_Path(double *x, double *y, int npoly, int *nper,
   }
   fprintf(d->out, "</a:pathLst></a:custGeom>");
   fill_props_gc(d, gc);
-  line_props(d, gc->col, gc->lwd, gc->lty);
+  line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
   fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
 }
 
