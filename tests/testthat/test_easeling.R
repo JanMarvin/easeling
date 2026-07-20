@@ -583,7 +583,8 @@ test_that("polyline crossing boundary is split and all segments stay within clip
 test_that("round cap emits cap=rnd", {
   f <- easel_dev(width = 3, height = 3)
   plot.new()
-  op <- par(lend = "round"); on.exit(par(op))
+  op <- par(lend = "round")
+  on.exit(par(op))
   lines(c(0.2, 0.8), c(0.5, 0.5), lwd = 4)
   dev.off()
   expect_match(read_xml_text(f), 'cap="rnd"')
@@ -592,7 +593,8 @@ test_that("round cap emits cap=rnd", {
 test_that("butt cap emits cap=flat", {
   f <- easel_dev(width = 3, height = 3)
   plot.new()
-  op <- par(lend = "butt"); on.exit(par(op))
+  op <- par(lend = "butt")
+  on.exit(par(op))
   lines(c(0.2, 0.8), c(0.5, 0.5), lwd = 4)
   dev.off()
   expect_match(read_xml_text(f), 'cap="flat"')
@@ -601,7 +603,8 @@ test_that("butt cap emits cap=flat", {
 test_that("square cap emits cap=sq", {
   f <- easel_dev(width = 3, height = 3)
   plot.new()
-  op <- par(lend = "square"); on.exit(par(op))
+  op <- par(lend = "square")
+  on.exit(par(op))
   lines(c(0.2, 0.8), c(0.5, 0.5), lwd = 4)
   dev.off()
   expect_match(read_xml_text(f), 'cap="sq"')
@@ -610,7 +613,8 @@ test_that("square cap emits cap=sq", {
 test_that("round join emits a:round", {
   f <- easel_dev(width = 3, height = 3)
   plot.new()
-  op <- par(ljoin = "round"); on.exit(par(op))
+  op <- par(ljoin = "round")
+  on.exit(par(op))
   lines(c(0.2, 0.5, 0.8), c(0.2, 0.8, 0.2), lwd = 4)
   dev.off()
   expect_match(read_xml_text(f), "<a:round/>")
@@ -619,7 +623,8 @@ test_that("round join emits a:round", {
 test_that("bevel join emits a:bevel", {
   f <- easel_dev(width = 3, height = 3)
   plot.new()
-  op <- par(ljoin = "bevel"); on.exit(par(op))
+  op <- par(ljoin = "bevel")
+  on.exit(par(op))
   lines(c(0.2, 0.5, 0.8), c(0.2, 0.8, 0.2), lwd = 4)
   dev.off()
   expect_match(read_xml_text(f), "<a:bevel/>")
@@ -628,7 +633,8 @@ test_that("bevel join emits a:bevel", {
 test_that("mitre join emits a:miter with lim scaled from lmitre", {
   f <- easel_dev(width = 3, height = 3)
   plot.new()
-  op <- par(ljoin = "mitre", lmitre = 4); on.exit(par(op))
+  op <- par(ljoin = "mitre", lmitre = 4)
+  on.exit(par(op))
   lines(c(0.2, 0.5, 0.8), c(0.2, 0.8, 0.2), lwd = 4)
   dev.off()
   txt <- read_xml_text(f)
