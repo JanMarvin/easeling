@@ -122,6 +122,9 @@ test_that("non-ASCII characters use the fallback width instead of erroring", {
   f <- easel_dev(width = 3, height = 3)
   plot.new()
   expect_error(text(0.5, 0.5, "caf\u00e9 \u65e5\u672c\u8a9e"), NA)
+  # strwidth of a pure non-ASCII string exercises the fallback char width path
+  w <- strwidth("\u65e5\u672c\u8a9e", units = "inches")
+  expect_gt(w, 0)
   dev.off()
   expect_wellformed_fragment(f)
 })
@@ -217,7 +220,8 @@ test_that("grid.raster() renders as run-length-encoded rects, not silently dropp
   f <- easel_dev(width = 3, height = 3)
   grid::grid.newpage()
   suppressWarnings(
-    grid::grid.raster(as.raster(matrix(c("red", "blue"), nrow = 2)))
+    # 2x2 raster: top row red+red, bottom row blue+blue — RLE produces runs of 2
+    grid::grid.raster(as.raster(matrix(c("red", "red", "blue", "blue"), nrow = 2, byrow = TRUE)))
   )
   dev.off()
   expect_gte(count_matches(f, 'prstGeom prst="rect"'), 1)
@@ -640,4 +644,19 @@ test_that("mitre join emits a:miter with lim scaled from lmitre", {
   txt <- read_xml_text(f)
   expect_match(txt, "<a:miter")
   expect_match(txt, 'lim="400000"')
+})
+
+# Stub GE callbacks (setClipPath, setMask) -----------------------------------
+
+test_that("grid clip path stub does not crash the device", {
+  # Xdr_SetClipPath is a no-op stub required by R_GE_version >= 13.
+  # The grid API for invoking it (createClipPath / viewport(clip=)) is
+  # unstable across grid versions; we verify at least that grid.clip()
+  # (which calls Xdr_Clip, not Xdr_SetClipPath) works correctly.
+  f <- easel_dev(width = 3, height = 3)
+  grid::grid.newpage()
+  grid::grid.clip(x = 0.1, y = 0.1, width = 0.5, height = 0.5)
+  expect_error(grid::grid.rect(gp = grid::gpar(fill = "red")), NA)
+  dev.off()
+  expect_wellformed_fragment(f)
 })

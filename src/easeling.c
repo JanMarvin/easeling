@@ -175,13 +175,9 @@ static void line_props(xdrDesc *d, int col, double lwd, int lty, int lend, int l
   double w_emu = (lwd > 0 ? lwd : 1.0) * 0.75 * PT_TO_EMU;
   int alpha = (int)(R_ALPHA(col) / 255.0 * 100000.0);
 
-  const char *cap;
-  switch (lend) {
-  case GE_ROUND_CAP:  cap = "rnd";  break;
-  case GE_BUTT_CAP:   cap = "flat"; break;
-  case GE_SQUARE_CAP: cap = "sq";   break;
-  default:            cap = "rnd";  break;
-  }
+  const char *cap = "rnd";
+  if      (lend == GE_BUTT_CAP)   cap = "flat";
+  else if (lend == GE_SQUARE_CAP) cap = "sq";
 
   fprintf(d->out,
           "<a:ln w=\"%.0f\" cap=\"%s\"><a:solidFill><a:srgbClr val=\"%06X\"><a:alpha val=\"%d\"/></a:srgbClr></a:solidFill>",
@@ -189,7 +185,6 @@ static void line_props(xdrDesc *d, int col, double lwd, int lty, int lend, int l
   emit_dash(d->out, lty, lwd);
 
   switch (ljoin) {
-  case GE_ROUND_JOIN: fprintf(d->out, "<a:round/>"); break;
   case GE_BEVEL_JOIN: fprintf(d->out, "<a:bevel/>"); break;
   case GE_MITRE_JOIN:
     /* OOXML miter limit is 100ths of line width; R's lmitre is a ratio */
