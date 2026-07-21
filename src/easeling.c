@@ -337,7 +337,7 @@ static void Xdr_Raster(unsigned int *raster, int w, int h,
         fprintf(d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
         fill_props(d, (int) col);
         fprintf(d->out, "<a:ln><a:noFill/></a:ln>");
-        fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
+        fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
       }
       i += run;
     }
@@ -440,7 +440,7 @@ static void Xdr_Line(double x1, double y1, double x2, double y2,
   double pts_y[2] = {y1, y2};
   points_to_pts(d, pts_x, pts_y, 2, x_min, y_min, w_emu, h_emu, FALSE);
   line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
-  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
+  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
 }
 
 static void Xdr_Rect(double x0, double y0, double x1, double y1,
@@ -457,7 +457,7 @@ static void Xdr_Rect(double x0, double y0, double x1, double y1,
   fprintf(d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
   fill_props_gc(d, gc);
   line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
-  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
+  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
 }
 
 static void Xdr_Circle(double x, double y, double r, const pGEcontext gc, pDevDesc dd) {
@@ -469,7 +469,7 @@ static void Xdr_Circle(double x, double y, double r, const pGEcontext gc, pDevDe
   fprintf(d->out, "<a:prstGeom prst=\"ellipse\"><a:avLst/></a:prstGeom>");
   fill_props_gc(d, gc);
   line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
-  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
+  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
 }
 
 static void bbox(double *x, double *y, int n, double *x0, double *y0,
@@ -506,7 +506,7 @@ static void Xdr_Polyline(int n, double *x, double *y, const pGEcontext gc, pDevD
     points_to_pts(d, pts_x, pts_y, 2, x_min, y_min, w_emu, h_emu, FALSE);
     fprintf(d->out, "<a:noFill/>");
     line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
-    fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
+    fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
   }
 }
 
@@ -538,7 +538,7 @@ static void Xdr_Polygon(int n, double *x, double *y, const pGEcontext gc, pDevDe
   points_to_pts(d, ox, oy, m, x_min, y_min, w_emu, h_emu, TRUE);
   fill_props_gc(d, gc);
   line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
-  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
+  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
 }
 
 static void Xdr_Path(double *x, double *y, int npoly, int *nper,
@@ -624,7 +624,7 @@ static void Xdr_Path(double *x, double *y, int npoly, int *nper,
   fprintf(d->out, "</a:pathLst></a:custGeom>");
   fill_props_gc(d, gc);
   line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
-  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:p/></xdr:txBody></xdr:sp>\n");
+  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
 }
 
 #define TEXT_Y_NUDGE 1.5
@@ -668,9 +668,9 @@ static void Xdr_TextImpl(double x, double y, const char *str, double rot,
 
   if (fabs(rot) > 1e-4) {
     int ooxml_rot = (int) (-rot * 60000.0);
-    fprintf(d->out, "<xdr:txBody><a:bodyPr rot=\"%d\" vert=\"horz\" anchor=\"ctr\" wrap=\"none\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/>", ooxml_rot);
+    fprintf(d->out, "<xdr:txBody><a:bodyPr rot=\"%d\" vert=\"horz\" anchor=\"ctr\" wrap=\"none\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/>", ooxml_rot);
   } else {
-    fprintf(d->out, "<xdr:txBody><a:bodyPr anchor=\"b\" wrap=\"none\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/>");
+    fprintf(d->out, "<xdr:txBody><a:bodyPr anchor=\"b\" wrap=\"none\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/>");
   }
 
   int alpha = (int)(R_ALPHA(gc->col) / 255.0 * 100000.0 + 0.5);
