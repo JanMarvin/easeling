@@ -24,7 +24,7 @@ fontconfig, or xml2 dependency.
 
 You can install development versions via r-universe:
 
-```{r}
+```{r, eval = FALSE}
 install.packages(
   "easeling",
   repos = c("https://janmarvin.r-universe.dev", "https://cloud.r-project.org")
@@ -33,7 +33,7 @@ install.packages(
 
 Or from GitHub directly:
 
-```{r}
+```{r, eval = FALSE}
 # install.packages("remotes")
 remotes::install_github("JanMarvin/easeling")
 ```
