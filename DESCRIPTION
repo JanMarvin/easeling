@@ -1,7 +1,7 @@
 Package: easeling
 Type: Package
 Title: Minimal DrawingML Graphics Device for openxlsx2
-Version: 0.1.1
+Version: 0.2
 Authors@R: c(
   person("Jan Marvin", "Garbuszus", email = "jan.garbuszus@ruhr-uni-bochum.de", role = c("aut", "cre"))
   )
