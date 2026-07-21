@@ -6,7 +6,7 @@ Authors@R: c(
   person("Jan Marvin", "Garbuszus", email = "jan.garbuszus@ruhr-uni-bochum.de", role = c("aut", "cre"))
   )
 Description: A base-R graphics device that writes R plots directly as
-    OOXML DrawingML shapes, for use with openxlsx2::wb_add_drawing().
+    OOXML DrawingML shapes, for use with `openxlsx2::wb_add_drawing()`.
     No dependency on Cairo, FreeType, fontconfig, or xml2.
 License: MIT + file LICENSE
 Encoding: UTF-8

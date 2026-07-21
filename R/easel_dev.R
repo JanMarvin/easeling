@@ -26,11 +26,9 @@
 #' @export
 #'
 #' @examples
-#' \donttest{
 #' f <- easel_dev(width = 6, height = 4, fontname = "Georgia")
 #' plot(1:10, (1:10)^2, type = "b")
 #' dev.off()
-#' }
 easel_dev <- function(file = tempfile(fileext = ".xml"), width = 6, height = 6,
                      pointsize = 12, fontname = "Calibri",
                      underline = FALSE, strikeout = FALSE) {
