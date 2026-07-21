@@ -56,11 +56,9 @@ The output file path, invisibly.
 ## Examples
 
 ``` r
-# \donttest{
 f <- easel_dev(width = 6, height = 4, fontname = "Georgia")
 plot(1:10, (1:10)^2, type = "b")
 dev.off()
-#> agg_record_199e55c19ae 
-#>                      2 
-# }
+#> agg_record_19c0321bb291 
+#>                       2 
 ```
