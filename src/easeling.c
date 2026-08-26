@@ -6,6 +6,7 @@
 #include <R_ext/Rdynload.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
@@ -14,6 +15,7 @@
 typedef struct {
   FILE *out;
   int shape_id;
+  int page;
   double clip_x0, clip_y0, clip_x1, clip_y1;
   char fontname[201];
   Rboolean underline;
@@ -33,7 +35,11 @@ static void esc_xml(const char *in, char *out, size_t outlen) {
     case '<':  memcpy(out + j, "&lt;",   4); j += 4; break;
     case '>':  memcpy(out + j, "&gt;",   4); j += 4; break;
     case '"':  memcpy(out + j, "&quot;", 6); j += 6; break;
-    default:   out[j++] = in[i];
+    default:
+      /* control chars other than \t \n \r are not legal in XML 1.0 */
+      if ((unsigned char) in[i] >= 0x20 ||
+          in[i] == '\t' || in[i] == '\n' || in[i] == '\r')
+        out[j++] = in[i];
     }
   }
   out[j] = '\0';
@@ -43,6 +49,19 @@ static unsigned int rgb_hex(int col) {
   return ((unsigned int) R_RED(col) << 16) |
     ((unsigned int) R_GREEN(col) << 8) |
     (unsigned int) R_BLUE(col);
+}
+
+static int alpha_pct(int col) {
+  return (int) lround(R_ALPHA(col) / 255.0 * 100000.0);
+}
+
+static void srgb_clr(FILE *out, int col) {
+  int a = alpha_pct(col);
+  if (a >= 100000)
+    fprintf(out, "<a:srgbClr val=\"%06X\"/>", rgb_hex(col));
+  else
+    fprintf(out, "<a:srgbClr val=\"%06X\"><a:alpha val=\"%d\"/></a:srgbClr>",
+            rgb_hex(col), a);
 }
 
 static void sp_open(xdrDesc *d, const char *name) {
@@ -66,9 +85,9 @@ static void fill_props(xdrDesc *d, int fill) {
   if (fill == NA_INTEGER || R_TRANSPARENT(fill)) {
     fprintf(d->out, "<a:noFill/>");
   } else {
-    int alpha = (int)(R_ALPHA(fill) / 255.0 * 100000.0);
-    fprintf(d->out, "<a:solidFill><a:srgbClr val=\"%06X\"><a:alpha val=\"%d\"/></a:srgbClr></a:solidFill>",
-            rgb_hex(fill), alpha);
+    fprintf(d->out, "<a:solidFill>");
+    srgb_clr(d->out, fill);
+    fprintf(d->out, "</a:solidFill>");
   }
 }
 
@@ -78,10 +97,9 @@ static void emit_gradient_stops_linear(xdrDesc *d, SEXP pattern) {
   for (int i = 0; i < n; i++) {
     double stop = R_GE_linearGradientStop(pattern, i);
     rcolor col = R_GE_linearGradientColour(pattern, i);
-    int pos = (int) round(stop * 100000.0);
-    int alpha = (int)(R_ALPHA((int) col) / 255.0 * 100000.0);
-    fprintf(d->out, "<a:gs pos=\"%d\"><a:srgbClr val=\"%06X\"><a:alpha val=\"%d\"/></a:srgbClr></a:gs>",
-            pos, rgb_hex((int) col), alpha);
+    fprintf(d->out, "<a:gs pos=\"%d\">", (int) lround(stop * 100000.0));
+    srgb_clr(d->out, (int) col);
+    fprintf(d->out, "</a:gs>");
   }
   fprintf(d->out, "</a:gsLst>");
 }
@@ -92,10 +110,9 @@ static void emit_gradient_stops_radial(xdrDesc *d, SEXP pattern) {
   for (int i = 0; i < n; i++) {
     double stop = R_GE_radialGradientStop(pattern, i);
     rcolor col = R_GE_radialGradientColour(pattern, i);
-    int pos = (int) round(stop * 100000.0);
-    int alpha = (int)(R_ALPHA((int) col) / 255.0 * 100000.0);
-    fprintf(d->out, "<a:gs pos=\"%d\"><a:srgbClr val=\"%06X\"><a:alpha val=\"%d\"/></a:srgbClr></a:gs>",
-            pos, rgb_hex((int) col), alpha);
+    fprintf(d->out, "<a:gs pos=\"%d\">", (int) lround(stop * 100000.0));
+    srgb_clr(d->out, (int) col);
+    fprintf(d->out, "</a:gs>");
   }
   fprintf(d->out, "</a:gsLst>");
 }
@@ -113,7 +130,7 @@ static void fill_props_gc(xdrDesc *d, const pGEcontext gc) {
       int ang_60000 = (int) round(ang_deg * 60000.0);
       fprintf(d->out, "<a:gradFill>");
       emit_gradient_stops_linear(d, gc->patternFill);
-      fprintf(d->out, "<a:lin ang=\"%d\" scaled=\"1\"/></a:gradFill>", ang_60000);
+      fprintf(d->out, "<a:lin ang=\"%d\" scaled=\"0\"/></a:gradFill>", ang_60000);
       return;
     } else if (type == R_GE_radialGradientPattern) {
       fprintf(d->out, "<a:gradFill>");
@@ -148,7 +165,10 @@ static void emit_dash(FILE *out, int lty, double lwd) {
   if (lty == LTY_LONGDASH) { fprintf(out, "<a:prstDash val=\"lgDash\"/>");    return; }
   if (lty == LTY_TWODASH)  { fprintf(out, "<a:prstDash val=\"lgDashDot\"/>"); return; }
 
-  /* Custom: extract nibbles, emit custDash. OOXML <a:ds d= sp=> in units of 1/1000 lwd. */
+  /* Custom: extract nibbles, emit custDash. OOXML <a:ds d= sp=> are
+   ST_PositivePercentage of the line width in 1000ths of a percent,
+   i.e. one line-width = 100000. R nibbles are dash/gap lengths in
+   line-width units. */
   unsigned int u = (unsigned int) lty;
   int nib[8];
   int count = 0;
@@ -160,8 +180,8 @@ static void emit_dash(FILE *out, int lty, double lwd) {
   if (count & 1) count++;
   fprintf(out, "<a:custDash>");
   for (int i = 0; i + 1 < count; i += 2) {
-    int d_val  = nib[i]   > 0 ? nib[i]   * 1000 : 1000;
-    int sp_val = nib[i+1] > 0 ? nib[i+1] * 1000 : 1000;
+    int d_val  = (nib[i]   > 0 ? nib[i]   : 1) * 100000;
+    int sp_val = (nib[i+1] > 0 ? nib[i+1] : 1) * 100000;
     fprintf(out, "<a:ds d=\"%d\" sp=\"%d\"/>", d_val, sp_val);
   }
   fprintf(out, "</a:custDash>");
@@ -173,21 +193,21 @@ static void line_props(xdrDesc *d, int col, double lwd, int lty, int lend, int l
     return;
   }
   double w_emu = (lwd > 0 ? lwd : 1.0) * 0.75 * PT_TO_EMU;
-  int alpha = (int)(R_ALPHA(col) / 255.0 * 100000.0);
 
   const char *cap = "rnd";
   if      (lend == GE_BUTT_CAP)   cap = "flat";
   else if (lend == GE_SQUARE_CAP) cap = "sq";
 
-  fprintf(d->out,
-          "<a:ln w=\"%.0f\" cap=\"%s\"><a:solidFill><a:srgbClr val=\"%06X\"><a:alpha val=\"%d\"/></a:srgbClr></a:solidFill>",
-          w_emu, cap, rgb_hex(col), alpha);
+  fprintf(d->out, "<a:ln w=\"%.0f\" cap=\"%s\"><a:solidFill>", w_emu, cap);
+  srgb_clr(d->out, col);
+  fprintf(d->out, "</a:solidFill>");
   emit_dash(d->out, lty, lwd);
 
   switch (ljoin) {
   case GE_BEVEL_JOIN: fprintf(d->out, "<a:bevel/>"); break;
   case GE_MITRE_JOIN:
-    /* OOXML miter limit is 100ths of line width; R's lmitre is a ratio */
+    /* OOXML miter lim is ST_PositivePercentage of line width; R's lmitre
+     is a plain ratio, so ratio * 100000 */
     fprintf(d->out, "<a:miter lim=\"%.0f\"/>", lmitre * 100000.0);
     break;
   default: fprintf(d->out, "<a:round/>"); break;
@@ -196,7 +216,7 @@ static void line_props(xdrDesc *d, int col, double lwd, int lty, int lend, int l
   fprintf(d->out, "</a:ln>");
 }
 
-static void points_to_pts(xdrDesc *d, double *x, double *y, int n,
+static void points_to_pts(xdrDesc *d, const double *x, const double *y, int n,
                           double x0, double y0, double w_emu, double h_emu,
                           Rboolean closed) {
   fprintf(d->out,
@@ -300,20 +320,168 @@ static int clip_polygon_sh(const double *x, const double *y, int n,
   return m;
 }
 
+static void bbox(const double *x, const double *y, int n, double *x0, double *y0,
+                 double *x1, double *y1) {
+  *x0 = *x1 = x[0]; *y0 = *y1 = y[0];
+  for (int i = 1; i < n; i++) {
+    if (x[i] < *x0) *x0 = x[i];
+    if (x[i] > *x1) *x1 = x[i];
+    if (y[i] < *y0) *y0 = y[i];
+    if (y[i] > *y1) *y1 = y[i];
+  }
+}
+
+static void emit_polyline_shape(xdrDesc *d, const double *x, const double *y,
+                                int n, const pGEcontext gc) {
+  double x0, y0, x1, y1;
+  bbox(x, y, n, &x0, &y0, &x1, &y1);
+  sp_open(d, "");
+  fprintf(d->out, "<xdr:spPr>");
+  xfrm(d, x0, y0, x1, y1);
+  points_to_pts(d, x, y, n, x0 * PT_TO_EMU, y0 * PT_TO_EMU,
+                (x1 - x0) * PT_TO_EMU, (y1 - y0) * PT_TO_EMU, FALSE);
+  fprintf(d->out, "<a:noFill/>");
+  line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
+  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
+}
+
+/* Clip an open polyline and emit it as one shape per maximal visible run,
+ so joins between consecutive segments render correctly and dash patterns
+ don't restart at every vertex. */
+static void emit_clipped_polyline(xdrDesc *d, const double *x, const double *y,
+                                  int n, const pGEcontext gc) {
+  if (n < 2) return;
+  if (gc->col == NA_INTEGER || R_TRANSPARENT(gc->col) || gc->lty == LTY_BLANK)
+    return;
+  double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
+  double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
+
+  double *rx = (double *) R_alloc((size_t) n, sizeof(double));
+  double *ry = (double *) R_alloc((size_t) n, sizeof(double));
+  int m = 0;
+  const double eps = 1e-9;
+
+  for (int i = 0; i < n - 1; i++) {
+    double ax = x[i], ay = y[i], bx = x[i + 1], by = y[i + 1];
+    if (!clip_line_lb(cx0, cy0, cx1, cy1, &ax, &ay, &bx, &by)) {
+      if (m >= 2) emit_polyline_shape(d, rx, ry, m, gc);
+      m = 0;
+      continue;
+    }
+    if (m > 0 && fabs(rx[m - 1] - ax) < eps && fabs(ry[m - 1] - ay) < eps) {
+      rx[m] = bx; ry[m] = by; m++;
+    } else {
+      if (m >= 2) emit_polyline_shape(d, rx, ry, m, gc);
+      rx[0] = ax; ry[0] = ay; rx[1] = bx; ry[1] = by;
+      m = 2;
+    }
+  }
+  if (m >= 2) emit_polyline_shape(d, rx, ry, m, gc);
+}
+
+static void emit_polygon_shape(xdrDesc *d, const double *x, const double *y,
+                               int m, const pGEcontext gc, int with_border) {
+  double x0, y0, x1, y1;
+  bbox(x, y, m, &x0, &y0, &x1, &y1);
+  sp_open(d, "");
+  fprintf(d->out, "<xdr:spPr>");
+  xfrm(d, x0, y0, x1, y1);
+  points_to_pts(d, x, y, m, x0 * PT_TO_EMU, y0 * PT_TO_EMU,
+                (x1 - x0) * PT_TO_EMU, (y1 - y0) * PT_TO_EMU, TRUE);
+  fill_props_gc(d, gc);
+  if (with_border)
+    line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
+  else
+    fprintf(d->out, "<a:ln><a:noFill/></a:ln>");
+  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
+}
+
+/* Clip a closed ring and emit it. If the clip actually cut the ring, the
+ fill is emitted without a stroke (so edges introduced by the clip aren't
+ drawn) and the surviving pieces of the original outline are stroked as
+ separate polylines. */
+static void emit_clipped_ring(xdrDesc *d, const double *x, const double *y,
+                              int n, const pGEcontext gc) {
+  if (n < 2) return;
+  double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
+  double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
+
+  int cap = (n + 4) * 4;
+  double *buf1x = (double *) R_alloc((size_t) cap, sizeof(double));
+  double *buf1y = (double *) R_alloc((size_t) cap, sizeof(double));
+  double *buf2x = (double *) R_alloc((size_t) cap, sizeof(double));
+  double *buf2y = (double *) R_alloc((size_t) cap, sizeof(double));
+  double *ox, *oy;
+  int m = clip_polygon_sh(x, y, n, cx0, cy0, cx1, cy1,
+                          buf1x, buf1y, buf2x, buf2y, &ox, &oy);
+  if (m < 2) return;
+
+  int cut = (m != n);
+  if (!cut) {
+    for (int i = 0; i < n; i++) {
+      if (ox[i] != x[i] || oy[i] != y[i]) { cut = 1; break; }
+    }
+  }
+  int has_border = !(gc->col == NA_INTEGER || R_TRANSPARENT(gc->col) ||
+                     gc->lty == LTY_BLANK);
+
+  emit_polygon_shape(d, ox, oy, m, gc, has_border && !cut);
+
+  if (cut && has_border) {
+    double *rx = (double *) R_alloc((size_t) n + 1, sizeof(double));
+    double *ry = (double *) R_alloc((size_t) n + 1, sizeof(double));
+    for (int i = 0; i < n; i++) { rx[i] = x[i]; ry[i] = y[i]; }
+    rx[n] = x[0]; ry[n] = y[0];
+    emit_clipped_polyline(d, rx, ry, n + 1, gc);
+  }
+}
+
+static void emit_filled_quad(xdrDesc *d, const double *qx, const double *qy, int col) {
+  double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
+  double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
+  double buf1x[32], buf1y[32], buf2x[32], buf2y[32];
+  double *ox, *oy;
+  int m = clip_polygon_sh(qx, qy, 4, cx0, cy0, cx1, cy1,
+                          buf1x, buf1y, buf2x, buf2y, &ox, &oy);
+  if (m < 3) return;
+  double x0, y0, x1, y1;
+  bbox(ox, oy, m, &x0, &y0, &x1, &y1);
+  sp_open(d, "");
+  fprintf(d->out, "<xdr:spPr>");
+  xfrm(d, x0, y0, x1, y1);
+  points_to_pts(d, ox, oy, m, x0 * PT_TO_EMU, y0 * PT_TO_EMU,
+                (x1 - x0) * PT_TO_EMU, (y1 - y0) * PT_TO_EMU, TRUE);
+  fill_props(d, col);
+  fprintf(d->out, "<a:ln><a:noFill/></a:ln>");
+  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
+}
+
 static void Xdr_Raster(unsigned int *raster, int w, int h,
                        double x, double y, double width, double height,
                        double rot, Rboolean interpolate,
                        const pGEcontext gc, pDevDesc dd) {
-  (void) interpolate; (void) gc; (void) rot;
+  (void) interpolate; (void) gc;
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   if (w <= 0 || h <= 0) return;
+
+  int rotated = fabs(rot) > 1e-4;
   double left  = fmin(x, x + width);
   double right = fmax(x, x + width);
   double top   = fmin(y, y + height);
   double bot   = fmax(y, y + height);
-  if (fully_outside_clip(d, left, top, right, bot)) return;
+  if (!rotated && fully_outside_clip(d, left, top, right, bot)) return;
+
   double cell_w = (right - left) / (double) w;
   double cell_h = (bot - top) / (double) h;
+  double sin_r = 0.0, cos_r = 1.0;
+  if (rotated) {
+    /* rot is degrees anticlockwise on screen about (x, y); device y runs
+     down, hence the sign flip on the y term below */
+    double t = rot * M_PI / 180.0;
+    sin_r = sin(t);
+    cos_r = cos(t);
+  }
+
   for (int j = 0; j < h; j++) {
     int i = 0;
     while (i < w) {
@@ -326,13 +494,33 @@ static void Xdr_Raster(unsigned int *raster, int w, int h,
         double rx1 = left + (i + run) * cell_w;
         double ry0 = top + j * cell_h;
         double ry1 = top + (j + 1) * cell_h;
-        sp_open(d, "");
-        fprintf(d->out, "<xdr:spPr>");
-        xfrm(d, rx0, ry0, rx1, ry1);
-        fprintf(d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
-        fill_props(d, (int) col);
-        fprintf(d->out, "<a:ln><a:noFill/></a:ln>");
-        fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
+        /* Opaque cells bleed half a cell right/down (renderers antialias
+         the seams between adjacent rects otherwise); the neighbouring
+         cells are drawn later and paint over the overlap. Translucent
+         cells can't overlap or the seams would double up instead. */
+        if (R_ALPHA((int) col) == 255) {
+          if (i + run < w) rx1 += cell_w * 0.5;
+          if (j + 1 < h)   ry1 += cell_h * 0.5;
+        }
+        if (!rotated) {
+          sp_open(d, "");
+          fprintf(d->out, "<xdr:spPr>");
+          xfrm(d, rx0, ry0, rx1, ry1);
+          fprintf(d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
+          fill_props(d, (int) col);
+          fprintf(d->out, "<a:ln><a:noFill/></a:ln>");
+          fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
+        } else {
+          double qx[4] = {rx0, rx1, rx1, rx0};
+          double qy[4] = {ry0, ry0, ry1, ry1};
+          double px[4], py[4];
+          for (int k = 0; k < 4; k++) {
+            double dx = qx[k] - x, dy = qy[k] - y;
+            px[k] = x + dx * cos_r + dy * sin_r;
+            py[k] = y - dx * sin_r + dy * cos_r;
+          }
+          emit_filled_quad(d, px, py, (int) col);
+        }
       }
       i += run;
     }
@@ -343,14 +531,21 @@ static void Xdr_Activate(const pDevDesc dd) { (void) dd; }
 static void Xdr_Deactivate(pDevDesc dd) { (void) dd; }
 static void Xdr_Mode(int mode, pDevDesc dd) { (void) mode; (void) dd; }
 
-static void Xdr_NewPage(const pGEcontext gc, pDevDesc dd) { (void) gc; (void) dd; }
+static void Xdr_NewPage(const pGEcontext gc, pDevDesc dd) {
+  (void) gc;
+  xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  d->page++;
+  if (d->page == 2)
+    Rf_warning("easeling writes a single drawing; additional pages are drawn on top of the first");
+}
 
 static void Xdr_Close(pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
 
   fprintf(d->out, "</xdr:grpSp><xdr:clientData/></xdr:absoluteAnchor></xdr:wsDr>");
 
-  fclose(d->out);
+  if (fclose(d->out) != 0)
+    Rf_warning("easeling: error writing output file");
   free(d);
 }
 
@@ -415,27 +610,17 @@ static void Xdr_MetricInfo(int c, const pGEcontext gc, double *ascent,
   double sz = gc->cex * gc->ps;
   *ascent  = 0.75 * sz;
   *descent = 0.25 * sz;
-  *width   = (c < 0 || c > 126) ? FALLBACK_CHAR_W * sz : char_width_frac((unsigned char) c) * sz;
+  if (c < 0) c = -c; /* negative c is a Unicode code point */
+  *width = (c >= 32 && c <= 126) ? char_width_frac((unsigned char) c) * sz
+                                 : FALLBACK_CHAR_W * sz;
 }
 
 static void Xdr_Line(double x1, double y1, double x2, double y2,
                      const pGEcontext gc, pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
-  double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
-  double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
-  if (!clip_line_lb(cx0, cy0, cx1, cy1, &x1, &y1, &x2, &y2)) return;
-  sp_open(d, "");
-  fprintf(d->out, "<xdr:spPr>");
-  xfrm(d, x1, y1, x2, y2);
-  double x_min = fmin(x1, x2) * PT_TO_EMU;
-  double y_min = fmin(y1, y2) * PT_TO_EMU;
-  double w_emu = fabs(x2 - x1) * PT_TO_EMU;
-  double h_emu = fabs(y2 - y1) * PT_TO_EMU;
-  double pts_x[2] = {x1, x2};
-  double pts_y[2] = {y1, y2};
-  points_to_pts(d, pts_x, pts_y, 2, x_min, y_min, w_emu, h_emu, FALSE);
-  line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
-  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
+  double px[2] = {x1, x2};
+  double py[2] = {y1, y2};
+  emit_clipped_polyline(d, px, py, 2, gc);
 }
 
 static void Xdr_Rect(double x0, double y0, double x1, double y1,
@@ -443,97 +628,75 @@ static void Xdr_Rect(double x0, double y0, double x1, double y1,
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
   double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
-  double rx0 = fmax(fmin(x0, x1), cx0), rx1 = fmin(fmax(x0, x1), cx1);
-  double ry0 = fmax(fmin(y0, y1), cy0), ry1 = fmin(fmax(y0, y1), cy1);
+  double ox0 = fmin(x0, x1), ox1 = fmax(x0, x1);
+  double oy0 = fmin(y0, y1), oy1 = fmax(y0, y1);
+  double rx0 = fmax(ox0, cx0), rx1 = fmin(ox1, cx1);
+  double ry0 = fmax(oy0, cy0), ry1 = fmin(oy1, cy1);
   if (rx1 <= rx0 || ry1 <= ry0) return;
+
+  int cut = (rx0 != ox0 || rx1 != ox1 || ry0 != oy0 || ry1 != oy1);
+  int has_border = !(gc->col == NA_INTEGER || R_TRANSPARENT(gc->col) ||
+                     gc->lty == LTY_BLANK);
+
   sp_open(d, "");
   fprintf(d->out, "<xdr:spPr>");
   xfrm(d, rx0, ry0, rx1, ry1);
   fprintf(d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
   fill_props_gc(d, gc);
-  line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
+  if (cut && has_border) {
+    /* clipping cut the rect: don't stroke the edges the clip introduced;
+     draw the surviving pieces of the original outline separately */
+    fprintf(d->out, "<a:ln><a:noFill/></a:ln>");
+  } else {
+    line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
+  }
   fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
+
+  if (cut && has_border) {
+    double bx[5] = {ox0, ox1, ox1, ox0, ox0};
+    double by[5] = {oy0, oy0, oy1, oy1, oy0};
+    emit_clipped_polyline(d, bx, by, 5, gc);
+  }
 }
 
 static void Xdr_Circle(double x, double y, double r, const pGEcontext gc, pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   if (fully_outside_clip(d, x - r, y - r, x + r, y + r)) return;
-  sp_open(d, "");
-  fprintf(d->out, "<xdr:spPr>");
-  xfrm(d, x - r, y - r, x + r, y + r);
-  fprintf(d->out, "<a:prstGeom prst=\"ellipse\"><a:avLst/></a:prstGeom>");
-  fill_props_gc(d, gc);
-  line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
-  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
-}
+  double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
+  double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
 
-static void bbox(double *x, double *y, int n, double *x0, double *y0,
-                 double *x1, double *y1) {
-  *x0 = *x1 = x[0]; *y0 = *y1 = y[0];
-  for (int i = 1; i < n; i++) {
-    if (x[i] < *x0) *x0 = x[i];
-    if (x[i] > *x1) *x1 = x[i];
-    if (y[i] < *y0) *y0 = y[i];
-    if (y[i] > *y1) *y1 = y[i];
+  if (x - r >= cx0 && x + r <= cx1 && y - r >= cy0 && y + r <= cy1) {
+    sp_open(d, "");
+    fprintf(d->out, "<xdr:spPr>");
+    xfrm(d, x - r, y - r, x + r, y + r);
+    fprintf(d->out, "<a:prstGeom prst=\"ellipse\"><a:avLst/></a:prstGeom>");
+    fill_props_gc(d, gc);
+    line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
+    fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
+    return;
   }
+
+  /* Partially clipped: a native ellipse can't be cut in DrawingML, so
+   approximate with a polygon and run it through the polygon clipper. */
+  #define CIRCLE_SEG 64
+  double px[CIRCLE_SEG], py[CIRCLE_SEG];
+  for (int i = 0; i < CIRCLE_SEG; i++) {
+    double t = 2.0 * M_PI * (double) i / (double) CIRCLE_SEG;
+    px[i] = x + r * cos(t);
+    py[i] = y + r * sin(t);
+  }
+  emit_clipped_ring(d, px, py, CIRCLE_SEG, gc);
+  #undef CIRCLE_SEG
 }
 
 static void Xdr_Polyline(int n, double *x, double *y, const pGEcontext gc, pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
-  double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
-  double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
-
-  /* Emit each clipped segment as a separate shape. Segments that vanish after
-   clipping are skipped. Consecutive visible segments could be merged but the
-   complexity is not worth it — polylines in R plots rarely have >100 points. */
-  for (int i = 0; i < n - 1; i++) {
-    double ax = x[i], ay = y[i], bx = x[i + 1], by = y[i + 1];
-    if (!clip_line_lb(cx0, cy0, cx1, cy1, &ax, &ay, &bx, &by)) continue;
-    sp_open(d, "");
-    fprintf(d->out, "<xdr:spPr>");
-    xfrm(d, ax, ay, bx, by);
-    double x_min = fmin(ax, bx) * PT_TO_EMU;
-    double y_min = fmin(ay, by) * PT_TO_EMU;
-    double w_emu = fabs(bx - ax) * PT_TO_EMU;
-    double h_emu = fabs(by - ay) * PT_TO_EMU;
-    double pts_x[2] = {ax, bx};
-    double pts_y[2] = {ay, by};
-    points_to_pts(d, pts_x, pts_y, 2, x_min, y_min, w_emu, h_emu, FALSE);
-    fprintf(d->out, "<a:noFill/>");
-    line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
-    fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
-  }
+  emit_clipped_polyline(d, x, y, n, gc);
 }
 
 static void Xdr_Polygon(int n, double *x, double *y, const pGEcontext gc, pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
-  double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
-  double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
-
-  /* Sutherland-Hodgman: output may have up to n+4 vertices per clip edge, 4 edges. */
-  int cap = (n + 4) * 4;
-  double *buf1x = (double *) R_alloc((size_t) cap, sizeof(double));
-  double *buf1y = (double *) R_alloc((size_t) cap, sizeof(double));
-  double *buf2x = (double *) R_alloc((size_t) cap, sizeof(double));
-  double *buf2y = (double *) R_alloc((size_t) cap, sizeof(double));
-  double *ox, *oy;
-  int m = clip_polygon_sh(x, y, n, cx0, cy0, cx1, cy1,
-                          buf1x, buf1y, buf2x, buf2y, &ox, &oy);
-  if (m < 2) return;
-
-  double x0, y0, x1, y1;
-  bbox(ox, oy, m, &x0, &y0, &x1, &y1);
-  sp_open(d, "");
-  fprintf(d->out, "<xdr:spPr>");
-  xfrm(d, x0, y0, x1, y1);
-  double x_min = fmin(x0, x1) * PT_TO_EMU;
-  double y_min = fmin(y0, y1) * PT_TO_EMU;
-  double w_emu = fabs(x1 - x0) * PT_TO_EMU;
-  double h_emu = fabs(y1 - y0) * PT_TO_EMU;
-  points_to_pts(d, ox, oy, m, x_min, y_min, w_emu, h_emu, TRUE);
-  fill_props_gc(d, gc);
-  line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
-  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
+  emit_clipped_ring(d, x, y, n, gc);
 }
 
 static void Xdr_Path(double *x, double *y, int npoly, int *nper,
@@ -565,7 +728,7 @@ static void Xdr_Path(double *x, double *y, int npoly, int *nper,
   double *cry = (double *) R_alloc((size_t)(cap * npoly), sizeof(double));
   int    *crn = (int *)    R_alloc((size_t) npoly, sizeof(int));
 
-  int idx = 0, any = 0;
+  int idx = 0, any = 0, cut = 0;
   double gx0 = R_PosInf, gy0 = R_PosInf, gx1 = R_NegInf, gy1 = R_NegInf;
   for (int k = 0; k < npoly; k++) {
     double *ox, *oy;
@@ -573,8 +736,10 @@ static void Xdr_Path(double *x, double *y, int npoly, int *nper,
                             cx0, cy0, cx1, cy1,
                             buf1x, buf1y, buf2x, buf2y, &ox, &oy);
     crn[k] = m;
+    if (m != nper[k]) cut = 1;
     if (m >= 2) {
       for (int i = 0; i < m; i++) {
+        if (!cut && (ox[i] != x[idx + i] || oy[i] != y[idx + i])) cut = 1;
         crx[k * cap + i] = ox[i];
         cry[k * cap + i] = oy[i];
         if (ox[i] < gx0) gx0 = ox[i];
@@ -587,6 +752,9 @@ static void Xdr_Path(double *x, double *y, int npoly, int *nper,
     idx += nper[k];
   }
   if (!any) return;
+
+  int has_border = !(gc->col == NA_INTEGER || R_TRANSPARENT(gc->col) ||
+                     gc->lty == LTY_BLANK);
 
   double x_min = gx0 * PT_TO_EMU;
   double y_min = gy0 * PT_TO_EMU;
@@ -618,19 +786,39 @@ static void Xdr_Path(double *x, double *y, int npoly, int *nper,
   }
   fprintf(d->out, "</a:pathLst></a:custGeom>");
   fill_props_gc(d, gc);
-  line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
+  if (has_border && !cut)
+    line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
+  else
+    fprintf(d->out, "<a:ln><a:noFill/></a:ln>");
   fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
-}
 
-#define TEXT_Y_NUDGE 1.5
+  if (has_border && cut) {
+    double *rx = (double *) R_alloc((size_t) max_ring + 1, sizeof(double));
+    double *ry = (double *) R_alloc((size_t) max_ring + 1, sizeof(double));
+    idx = 0;
+    for (int k = 0; k < npoly; k++) {
+      int nk = nper[k];
+      for (int i = 0; i < nk; i++) { rx[i] = x[idx + i]; ry[i] = y[idx + i]; }
+      rx[nk] = x[idx]; ry[nk] = y[idx];
+      emit_clipped_polyline(d, rx, ry, nk + 1, gc);
+      idx += nk;
+    }
+  }
+}
 
 static void Xdr_TextImpl(double x, double y, const char *str, double rot,
                          double hadj, const pGEcontext gc, pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
-  char buf[2048];
-  esc_xml(str, buf, sizeof(buf));
+  if (str == NULL || str[0] == '\0') return;
+  size_t buflen = strlen(str) * 6 + 1;
+  char *buf = R_alloc(buflen, 1);
+  esc_xml(str, buf, buflen);
+  double fs = gc->cex * gc->ps;
   double w = Xdr_StrWidth(str, gc, dd);
-  double h = (gc->cex * gc->ps) * 1.2;
+  double h = fs * 1.2;
+  /* gap between the baseline anchor and the bottom of the text box,
+   approximating the font descent; 1.5pt at the default 12pt */
+  double nudge = 0.125 * fs;
 
   double bx0, by0, bx1, by1;
   if (fabs(rot) > 1e-4) {
@@ -641,7 +829,7 @@ static void Xdr_TextImpl(double x, double y, const char *str, double rot,
     double cos_r = cos(theta);
     double sin_r = sin(theta);
     double ox = hadj * w - w / 2.0;   /* local anchor x, relative to box center */
-    double oy = h / 2.0;              /* local anchor y (baseline), relative to center */
+    double oy = h / 2.0 - nudge;      /* local anchor y (baseline), relative to center */
     double rot_ox = ox * cos_r - oy * sin_r;
     double rot_oy = ox * sin_r + oy * cos_r;
     double cx = x - rot_ox;
@@ -649,7 +837,7 @@ static void Xdr_TextImpl(double x, double y, const char *str, double rot,
     bx0 = cx - w / 2.0; by0 = cy - h / 2.0; bx1 = bx0 + w; by1 = by0 + h;
   } else {
     double base_x = x - hadj * w;
-    bx0 = base_x; by0 = y - h + TEXT_Y_NUDGE; bx1 = base_x + w; by1 = y + TEXT_Y_NUDGE;
+    bx0 = base_x; by0 = y - h + nudge; bx1 = base_x + w; by1 = y + nudge;
   }
   if (fully_outside_clip(d, bx0, by0, bx1, by1)) return;
 
@@ -668,7 +856,6 @@ static void Xdr_TextImpl(double x, double y, const char *str, double rot,
     fprintf(d->out, "<xdr:txBody><a:bodyPr anchor=\"b\" wrap=\"none\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/>");
   }
 
-  int alpha = (int)(R_ALPHA(gc->col) / 255.0 * 100000.0 + 0.5);
   const char *b_attr = (gc->fontface == 2 || gc->fontface == 4) ? " b=\"1\"" : "";
   const char *i_attr = (gc->fontface == 3 || gc->fontface == 4) ? " i=\"1\"" : "";
   const char *u_attr = d->underline ? " u=\"sng\"" : "";
@@ -676,24 +863,20 @@ static void Xdr_TextImpl(double x, double y, const char *str, double rot,
 
   const char *algn = (hadj < 0.25) ? "l" : (hadj > 0.75) ? "r" : "ctr";
   const char *font = is_generic_family(gc->fontfamily) ? d->fontname : gc->fontfamily;
+  char fbuf[1301];
+  esc_xml(font, fbuf, sizeof(fbuf));
+
+  int sz = (int) lround(fs * 100.0);
+  if (sz < 100) sz = 100;
 
   fprintf(d->out,
-          "<a:p><a:pPr algn=\"%s\"/><a:r>"
-          "<a:rPr sz=\"%d\"%s%s%s%s>"
-          "<a:solidFill><a:srgbClr val=\"%06X\"><a:alpha val=\"%d\"/></a:srgbClr></a:solidFill>"
-          "<a:latin typeface=\"%s\"/><a:cs typeface=\"%s\"/></a:rPr>"
+          "<a:p><a:pPr algn=\"%s\"/><a:r><a:rPr sz=\"%d\"%s%s%s%s><a:solidFill>",
+          algn, sz, b_attr, i_attr, u_attr, strike_attr);
+  srgb_clr(d->out, gc->col);
+  fprintf(d->out,
+          "</a:solidFill><a:latin typeface=\"%s\"/><a:cs typeface=\"%s\"/></a:rPr>"
           "<a:t>%s</a:t></a:r></a:p></xdr:txBody></xdr:sp>\n",
-          algn,                           // %s (algn)
-          (int)(gc->cex * gc->ps * 100), // %d (sz)
-          b_attr,                        // %s (b_attr)
-          i_attr,                        // %s (i_attr)
-          u_attr,                        // %s (u_attr)
-          strike_attr,                   // %s (strike_attr)
-          rgb_hex(gc->col),              // %06X (color)
-          alpha,                         // %d (alpha)
-          font,                          // %s (latin typeface)
-          font,                          // %s (cs typeface)
-          buf);                          // %s (text)
+          fbuf, fbuf, buf);
 }
 
 static void Xdr_Text(double x, double y, const char *str, double rot,
@@ -749,7 +932,8 @@ SEXP easeling_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
 
   xd->out = fopen(path, "w");
   if (xd->out == NULL) { free(xd); free(dd); Rf_error("cannot open '%s'", path); }
-  xd->shape_id = 1;
+  xd->shape_id = 2; /* id 1 is the group */
+  xd->page = 0;
   xd->clip_x0 = 0; xd->clip_y0 = 0;
   xd->clip_x1 = width * 72.0; xd->clip_y1 = height * 72.0;
   strncpy(xd->fontname, fontname, sizeof(xd->fontname) - 1);
@@ -768,7 +952,7 @@ SEXP easeling_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
             "<xdr:absoluteAnchor>"
             "<xdr:pos x=\"0\" y=\"0\"/>"
             "<xdr:ext cx=\"%.0f\" cy=\"%.0f\"/>"
-            "<xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr id=\"0\" name=\"R_Graphics_Group\"/><xdr:cNvGrpSpPr/></xdr:nvGrpSpPr>"
+            "<xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr id=\"1\" name=\"R_Graphics_Group\"/><xdr:cNvGrpSpPr/></xdr:nvGrpSpPr>"
             "<xdr:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%.0f\" cy=\"%.0f\"/>"
             "<a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"%.0f\" cy=\"%.0f\"/></a:xfrm></xdr:grpSpPr>",
               emu_w, emu_h,
@@ -788,7 +972,11 @@ SEXP easeling_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
   dd->cra[1] = 1.2 * ps;
   dd->gamma = 1;
   dd->canClip = TRUE;
-  dd->canHAdj = 0;
+  /* 2 = device handles hadj itself. Excel lays the text out with the real
+   font, so aligning via the text-box (a:pPr algn + wrap=none) is robust
+   to our approximate string widths; letting R pre-shift x (canHAdj=0)
+   would bake the metric error into the position instead. */
+  dd->canHAdj = 2;
   dd->canChangeGamma = FALSE;
   dd->startps = ps;
   dd->startcol = (int) R_RGB(0, 0, 0);
@@ -826,7 +1014,7 @@ SEXP easeling_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
   dd->hasTextUTF8 = TRUE;
   dd->textUTF8 = Xdr_Text;
   dd->strWidthUTF8 = Xdr_StrWidth;
-  dd->wantSymbolUTF8 = FALSE;
+  dd->wantSymbolUTF8 = TRUE;
   dd->useRotatedTextInContour = FALSE;
 
   dd->eventEnv = R_NilValue;

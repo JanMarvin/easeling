@@ -32,9 +32,19 @@
 easel_dev <- function(file = tempfile(fileext = ".xml"), width = 6, height = 6,
                      pointsize = 12, fontname = "Calibri",
                      underline = FALSE, strikeout = FALSE) {
-  file <- path.expand(file)
-  invisible(.Call(C_easeling_, file, as.double(width), as.double(height),
-                  as.double(pointsize), as.character(fontname),
-                  as.logical(underline), as.logical(strikeout)))
+  file <- path.expand(file[1L])
+  width <- as.double(width[1L])
+  height <- as.double(height[1L])
+  pointsize <- as.double(pointsize[1L])
+  if (!is.finite(width) || width <= 0 || !is.finite(height) || height <= 0)
+    stop("'width' and 'height' must be positive")
+  if (!is.finite(pointsize) || pointsize <= 0)
+    stop("'pointsize' must be positive")
+  fontname <- as.character(fontname[1L])
+  if (is.na(fontname) || !nzchar(fontname))
+    stop("'fontname' must be a non-empty string")
+  invisible(.Call(C_easeling_, file, width, height, pointsize, fontname,
+                  isTRUE(as.logical(underline[1L])),
+                  isTRUE(as.logical(strikeout[1L]))))
   invisible(file)
 }
