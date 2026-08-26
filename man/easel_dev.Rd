@@ -11,7 +11,11 @@ easel_dev(
   pointsize = 12,
   fontname = "Calibri",
   underline = FALSE,
-  strikeout = FALSE
+  strikeout = FALSE,
+  dims = NULL,
+  wb = NULL,
+  sheet = 1,
+  text_voff = 0.35
 )
 }
 \arguments{
@@ -34,6 +38,24 @@ this default.}
 device. Unlike `fontname`, these have no per-call R equivalent (base
 graphics has no underline/strikeout concept), so they're a device-wide
 setting.}
+
+\item{dims}{Optionally, a cell range such as `"A1:G15"`. If given,
+`width` and `height` are ignored and computed from the region via
+[easel_size()], so the plot fills that region exactly when later
+anchored to the same `dims`.}
+
+\item{wb, sheet}{Passed to [easel_size()] when `dims` is given: the
+`openxlsx2` workbook (and sheet) to read actual column widths and row
+heights from.}
+
+\item{text_voff}{Vertical text calibration in em: text boxes are
+centre-anchored, and the baseline is placed `text_voff` em below the
+box centre. The default `0.35` was calibrated against Excel's line layout for
+Calibri; LibreOffice's optimum is around 0.24, so text there sits
+~0.1 em low. Increase to shift rendered text up,
+decrease to shift it down, if your spreadsheet application's line
+layout places it visibly off; see
+`system.file("examples", "calibrate_text.R", package = "easeling")`.}
 }
 \value{
 The output file path, invisibly.

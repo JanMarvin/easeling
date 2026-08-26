@@ -18,6 +18,7 @@ typedef struct {
   int page;
   double clip_x0, clip_y0, clip_x1, clip_y1;
   char fontname[201];
+  double text_voff;
   Rboolean underline;
   Rboolean strikeout;
 } xdrDesc;
@@ -532,11 +533,19 @@ static void Xdr_Deactivate(pDevDesc dd) { (void) dd; }
 static void Xdr_Mode(int mode, pDevDesc dd) { (void) mode; (void) dd; }
 
 static void Xdr_NewPage(const pGEcontext gc, pDevDesc dd) {
-  (void) gc;
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   d->page++;
   if (d->page == 2)
     Rf_warning("easeling writes a single drawing; additional pages are drawn on top of the first");
+  if (gc->fill != NA_INTEGER && !R_TRANSPARENT(gc->fill)) {
+    sp_open(d, "");
+    fprintf(d->out, "<xdr:spPr>");
+    xfrm(d, 0.0, 0.0, dd->right, dd->bottom);
+    fprintf(d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
+    fill_props(d, gc->fill);
+    fprintf(d->out, "<a:ln><a:noFill/></a:ln>");
+    fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
+  }
 }
 
 static void Xdr_Close(pDevDesc dd) {
@@ -604,13 +613,44 @@ static double Xdr_StrWidth(const char *str, const pGEcontext gc, pDevDesc dd) {
   return total * sz;
 }
 
+/* Approximate per-character ink extents for a Calibri-like sans font, in
+ em. R centres and stacks text using these (GEText vertical justification
+ takes the max ascent/descent over the string's characters), so a flat
+ 0.75/0.25 for every character put descender-less strings ~0.07em off
+ centre. Rendering position itself only depends on the baseline. */
+static void char_vmetrics(int c, double *asc, double *desc) {
+  *asc = 0.75; *desc = 0.21;              /* generous default (non-ASCII) */
+  if (c < 32 || c > 126) return;
+  char ch = (char) c;
+  *desc = 0.0;
+  if (strchr("gjpqy", ch))            *desc = 0.21;
+  else if (strchr("()[]{}/\\|@$;,", ch)) *desc = 0.12;
+  else if (ch == '_')                 *desc = 0.10;
+
+  if (ch == ' ')                      *asc = 0.0;
+  else if (strchr("acemnorsuvwxz", ch)) *asc = 0.47;
+  else if (strchr("gpqy", ch))        *asc = 0.47;
+  else if (strchr("ij", ch))          *asc = 0.64;
+  else if (strchr(".,_", ch))         *asc = 0.12;
+  else if (strchr("-~=+<>*:;", ch))   *asc = 0.50;
+  else if (strchr("()[]{}/\\|$", ch)) *asc = 0.70;
+  else                                *asc = 0.66;  /* caps, digits, rest */
+}
+
 static void Xdr_MetricInfo(int c, const pGEcontext gc, double *ascent,
                            double *descent, double *width, pDevDesc dd) {
   (void) dd;
   double sz = gc->cex * gc->ps;
-  *ascent  = 0.75 * sz;
-  *descent = 0.25 * sz;
   if (c < 0) c = -c; /* negative c is a Unicode code point */
+  if (c == 0) {      /* whole-font metrics */
+    *ascent  = 0.75 * sz;
+    *descent = 0.25 * sz;
+  } else {
+    double a, d2;
+    char_vmetrics(c, &a, &d2);
+    *ascent  = a * sz;
+    *descent = d2 * sz;
+  }
   *width = (c >= 32 && c <= 126) ? char_width_frac((unsigned char) c) * sz
                                  : FALLBACK_CHAR_W * sz;
 }
@@ -816,9 +856,14 @@ static void Xdr_TextImpl(double x, double y, const char *str, double rot,
   double fs = gc->cex * gc->ps;
   double w = Xdr_StrWidth(str, gc, dd);
   double h = fs * 1.2;
-  /* gap between the baseline anchor and the bottom of the text box,
-   approximating the font descent; 1.5pt at the default 12pt */
-  double nudge = 0.125 * fs;
+  /* Text is centred in its box (anchor="ctr"), so the box centre must sit
+   at the visual centre of the line: baseline - (ascent - descent)/2.
+   With the device metrics (0.75/0.25 em) that is 0.25em above the
+   baseline. Centre-anchoring is robust across renderers - Excel and
+   LibreOffice disagree on how much descent/line-gap hangs below a
+   bottom-anchored line, which made anchor="b" text sit visibly high in
+   Excel, but a centred line splits those conventions symmetrically. */
+  double base_off = d->text_voff * fs; /* baseline below box centre */
 
   double bx0, by0, bx1, by1;
   if (fabs(rot) > 1e-4) {
@@ -829,7 +874,7 @@ static void Xdr_TextImpl(double x, double y, const char *str, double rot,
     double cos_r = cos(theta);
     double sin_r = sin(theta);
     double ox = hadj * w - w / 2.0;   /* local anchor x, relative to box center */
-    double oy = h / 2.0 - nudge;      /* local anchor y (baseline), relative to center */
+    double oy = base_off;             /* local anchor y (baseline), relative to center */
     double rot_ox = ox * cos_r - oy * sin_r;
     double rot_oy = ox * sin_r + oy * cos_r;
     double cx = x - rot_ox;
@@ -837,7 +882,18 @@ static void Xdr_TextImpl(double x, double y, const char *str, double rot,
     bx0 = cx - w / 2.0; by0 = cy - h / 2.0; bx1 = bx0 + w; by1 = by0 + h;
   } else {
     double base_x = x - hadj * w;
-    bx0 = base_x; by0 = y - h + nudge; bx1 = base_x + w; by1 = y + nudge;
+    double cy = y - base_off;
+    bx0 = base_x; by0 = cy - h / 2.0; bx1 = base_x + w; by1 = cy + h / 2.0;
+    /* Shrink the box horizontally where algn pins the ink to an edge
+     anyway (wrap is off, so the text still renders in full). Boxes
+     hanging outside the canvas otherwise stick out of the group's frame
+     in Excel. Vertical shrinking would move centre-anchored ink, so the
+     box may overhang the canvas top by up to 0.1em - acceptable. */
+    if (hadj < 0.25) {          /* algn "l": right edge is free */
+      if (bx1 > dd->right && bx0 < dd->right) bx1 = dd->right;
+    } else if (hadj > 0.75) {   /* algn "r": left edge is free */
+      if (bx0 < 0.0 && bx1 > 0.0) bx0 = 0.0;
+    }
   }
   if (fully_outside_clip(d, bx0, by0, bx1, by1)) return;
 
@@ -853,7 +909,7 @@ static void Xdr_TextImpl(double x, double y, const char *str, double rot,
     int ooxml_rot = (int) (-rot * 60000.0);
     fprintf(d->out, "<xdr:txBody><a:bodyPr rot=\"%d\" vert=\"horz\" anchor=\"ctr\" wrap=\"none\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/>", ooxml_rot);
   } else {
-    fprintf(d->out, "<xdr:txBody><a:bodyPr anchor=\"b\" wrap=\"none\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/>");
+    fprintf(d->out, "<xdr:txBody><a:bodyPr anchor=\"ctr\" wrap=\"none\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/>");
   }
 
   const char *b_attr = (gc->fontface == 2 || gc->fontface == 4) ? " b=\"1\"" : "";
@@ -912,7 +968,8 @@ static void Xdr_ReleaseMask(SEXP ref, pDevDesc dd) {
 }
 
 SEXP easeling_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
-               SEXP fontname_, SEXP underline_, SEXP strikeout_) {
+               SEXP fontname_, SEXP underline_, SEXP strikeout_,
+               SEXP text_voff_) {
   const char *path = CHAR(STRING_ELT(path_, 0));
   double width  = REAL(width_)[0];
   double height = REAL(height_)[0];
@@ -937,6 +994,7 @@ SEXP easeling_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
   xd->clip_x0 = 0; xd->clip_y0 = 0;
   xd->clip_x1 = width * 72.0; xd->clip_y1 = height * 72.0;
   strncpy(xd->fontname, fontname, sizeof(xd->fontname) - 1);
+  xd->text_voff = REAL(text_voff_)[0];
   xd->fontname[sizeof(xd->fontname) - 1] = '\0';
   xd->underline = underline;
   xd->strikeout = strikeout;
@@ -1045,7 +1103,7 @@ SEXP easeling_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
 }
 
 static const R_CallMethodDef CallEntries[] = {
-  {"easeling_", (DL_FUNC) &easeling_, 7},
+  {"easeling_", (DL_FUNC) &easeling_, 8},
   {NULL, NULL, 0}
 };
 

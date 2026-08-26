@@ -486,7 +486,7 @@ test_that("line crossing right boundary is clipped to par() plot region", {
   bb <- data_shape_bboxes(f, w, h)
   expect_equal(nrow(bb), 1, label = "exactly one clipped line segment")
   tol <- 1 / pt_to_emu / 72
-  expect_lte(bb$x1, clip["x1"] + tol)
+  expect_lte(max(bb$x1), clip["x1"] + tol)
   expect_gte(bb$x0, clip["x0"] - tol)
 })
 
@@ -517,7 +517,7 @@ test_that("rect clipped to par() plot region right boundary", {
   bb <- data_shape_bboxes(f, w, h)
   expect_equal(nrow(bb), 3)
   tol <- 1 / pt_to_emu / 72
-  # expect_lte(bb$x1, clip["x1"] + tol)
+  expect_lte(max(bb$x1), clip["x1"] + tol)
 })
 
 test_that("rect entirely outside plot region produces no shapes", {
@@ -657,4 +657,135 @@ test_that("grid clip path stub does not crash the device", {
   expect_error(grid::grid.rect(gp = grid::gpar(fill = "red")), NA)
   dev.off()
   expect_wellformed_fragment(f)
+})
+
+# Coverage of paths added in 0.2 improvements ---------------------------------
+
+test_that("XML-illegal control characters are stripped from text", {
+  f <- easel_dev(width = 3, height = 3)
+  plot.new()
+  text(0.5, 0.5, "a\fb\tc")
+  dev.off()
+  txt <- read_xml_text(f)
+  expect_match(txt, "<a:t>a", fixed = TRUE)
+  expect_false(grepl("\f", txt, fixed = TRUE))
+  expect_true(grepl("\tc</a:t>", txt, fixed = TRUE))
+  expect_wellformed_fragment(f)
+})
+
+test_that("rotated rasterImage emits clipped quads at the right anchor", {
+  w <- 4; h <- 4
+  f <- easel_dev(width = w, height = h)
+  plot.new()
+  plot.window(c(0, 1), c(0, 1), xaxs = "i", yaxs = "i")
+  rasterImage(as.raster(matrix(c("red", "blue"), 1)), 0.4, 0.4, 0.6, 0.6,
+              angle = 45)
+  dev.off()
+  txt <- read_xml_text(f)
+  expect_gte(count_matches(f, "<a:custGeom>"), 2)
+  expect_wellformed_fragment(f)
+  bb <- data_shape_bboxes(f, w, h)
+  clip <- clip_bounds_in()
+  tol <- 1 / pt_to_emu / 72
+  expect_lte(max(bb$x1), clip["x1"] + tol)
+})
+
+test_that("fully transparent polyline colour emits no shapes", {
+  f <- easel_dev(width = 3, height = 3)
+  plot.new()
+  lines(c(0.1, 0.5, 0.9), c(0.1, 0.9, 0.1), col = NA)
+  lines(c(0.1, 0.5, 0.9), c(0.2, 0.8, 0.2), col = "#00000000")
+  dev.off()
+  expect_equal(count_matches(f, "<xdr:sp "), 0)
+})
+
+test_that("circle crossing the clip boundary is polygon-approximated and cut", {
+  w <- 4; h <- 3
+  f <- easel_dev(width = w, height = h)
+  plot.new()
+  clip <- clip_bounds_in()
+  symbols(0, 0.5, circles = 0.3, inches = FALSE, add = TRUE,
+          bg = "gold", fg = "navy")
+  dev.off()
+  txt <- read_xml_text(f)
+  expect_false(grepl('prst="ellipse"', txt))
+  expect_gte(count_matches(f, "<a:custGeom>"), 1)
+  bb <- data_shape_bboxes(f, w, h)
+  tol <- 1 / pt_to_emu / 72
+  expect_gte(min(bb$x0), clip["x0"] - tol)
+})
+
+test_that("clipped grid.path suppresses the stroke on clip-introduced edges", {
+  f <- easel_dev(width = 3, height = 3)
+  grid::grid.path(
+    x = c(-0.2, 0.5, 0.5, -0.2), y = c(0.2, 0.2, 0.6, 0.6),
+    gp = grid::gpar(fill = "gold", col = "navy", lwd = 2)
+  )
+  dev.off()
+  txt <- read_xml_text(f)
+  # fill shape carries no stroke; separate stroked polylines follow
+  expect_match(txt, "<a:ln><a:noFill/></a:ln>", fixed = TRUE)
+  expect_gte(count_matches(f, "<xdr:sp "), 2)
+})
+
+test_that("a second page warns that pages overdraw", {
+  f <- easel_dev(width = 3, height = 3)
+  plot(1)
+  expect_warning(plot(2), "single drawing")
+  dev.off()
+  expect_true(file.exists(f))
+})
+
+test_that("easel_dev validates its arguments", {
+  expect_error(easel_dev(width = -1), "positive")
+  expect_error(easel_dev(pointsize = 0), "positive")
+  expect_error(easel_dev(fontname = NA_character_), "non-empty")
+})
+
+# easel_size / dims-first sizing ----------------------------------------------
+
+test_that("easel_size matches Excel default geometry", {
+  # 8.43-char cols = 64px, 15pt rows = 20px, 96 px/in
+  expect_equal(unname(easel_size("A1:G15")), c(7 * 64, 15 * 20) / 96)
+  expect_equal(unname(easel_size("A1")), c(64, 20) / 96)
+  expect_equal(easel_size("B2:F12"), easel_size("F12:B2"))
+  expect_equal(easel_size("$B$2:$F$12"), easel_size("B2:F12"))
+})
+
+test_that("easel_size reads custom widths, heights, and defaults from a wb", {
+  skip_if_not_installed("openxlsx2")
+  wb <- openxlsx2::wb_workbook()$add_worksheet()
+  wb$set_col_widths(cols = 2, widths = 25)
+  wb$set_row_heights(rows = 4:6, heights = 30)
+  # openxlsx2 pads stored width (25 -> 25.711) and writes defaultRowHeight=16
+  stored <- as.numeric(sub('.*width="([0-9.]+)".*', "\\1",
+                           wb$worksheets[[1]]$cols_attr[1]))
+  b_px <- trunc(stored * 7 + 0.5) + 5
+  sz <- easel_size("B2:F12", wb)
+  expect_equal(unname(sz["width"]), (b_px + 4 * 64) / 96)
+  def_ht <- as.numeric(sub('.*defaultRowHeight="([0-9.]+)".*', "\\1",
+                           wb$worksheets[[1]]$sheetFormatPr))
+  expect_equal(unname(sz["height"]), (8 * round(def_ht * 4 / 3) + 3 * 40) / 96)
+})
+
+test_that("easel_dev(dims=) sizes the device from the region", {
+  f <- easel_dev(dims = "A1:G15")
+  plot(1)
+  dev.off()
+  txt <- read_xml_text(f)
+  sz <- easel_size("A1:G15")
+  emu <- round(sz * 914400)
+  expect_match(txt, sprintf('cx="%d" cy="%d"', emu[["width"]], emu[["height"]]))
+  expect_error(easel_size("nope"), "cell")
+})
+
+test_that("par(bg=) paints a full-canvas background rect", {
+  f <- easel_dev(width = 3, height = 2)
+  par(bg = "magenta")
+  plot.new()
+  dev.off()
+  par(bg = "white")
+  txt <- read_xml_text(f)
+  expect_match(txt, 'val="FF00FF"')
+  expect_match(txt, sprintf('cx="%.0f" cy="%.0f"', 3 * 914400, 2 * 914400))
 })
