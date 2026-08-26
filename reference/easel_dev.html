@@ -50,7 +50,11 @@ dependency on Cairo, FreeType, fontconfig, or xml2.</p>
 <span>  pointsize <span class="op">=</span> <span class="fl">12</span>,</span>
 <span>  fontname <span class="op">=</span> <span class="st">"Calibri"</span>,</span>
 <span>  underline <span class="op">=</span> <span class="cn">FALSE</span>,</span>
-<span>  strikeout <span class="op">=</span> <span class="cn">FALSE</span></span>
+<span>  strikeout <span class="op">=</span> <span class="cn">FALSE</span>,</span>
+<span>  dims <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  wb <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  sheet <span class="op">=</span> <span class="fl">1</span>,</span>
+<span>  text_voff <span class="op">=</span> <span class="fl">0.35</span></span>
 <span><span class="op">)</span></span></code></pre></div>
     </div>
 
@@ -87,6 +91,30 @@ device. Unlike `fontname`, these have no per-call R equivalent (base
 graphics has no underline/strikeout concept), so they're a device-wide
 setting.</p></dd>
 
+
+<dt id="arg-dims">dims<a class="anchor" aria-label="anchor" href="#arg-dims"></a></dt>
+<dd><p>Optionally, a cell range such as `"A1:G15"`. If given,
+`width` and `height` are ignored and computed from the region via
+[easel_size()], so the plot fills that region exactly when later
+anchored to the same `dims`.</p></dd>
+
+
+<dt id="arg-wb-sheet">wb, sheet<a class="anchor" aria-label="anchor" href="#arg-wb-sheet"></a></dt>
+<dd><p>Passed to [easel_size()] when `dims` is given: the
+`openxlsx2` workbook (and sheet) to read actual column widths and row
+heights from.</p></dd>
+
+
+<dt id="arg-text-voff">text_voff<a class="anchor" aria-label="anchor" href="#arg-text-voff"></a></dt>
+<dd><p>Vertical text calibration in em: text boxes are
+centre-anchored, and the baseline is placed `text_voff` em below the
+box centre. The default `0.35` was calibrated against Excel's line layout for
+Calibri; LibreOffice's optimum is around 0.24, so text there sits
+~0.1 em low. Increase to shift rendered text up,
+decrease to shift it down, if your spreadsheet application's line
+layout places it visibly off; see
+`system.file("examples", "calibrate_text.R", package = "easeling")`.</p></dd>
+
 </dl></div>
     <div class="section level2">
     <h2 id="value">Value<a class="anchor" aria-label="anchor" href="#value"></a></h2>
@@ -98,7 +126,7 @@ setting.</p></dd>
     <div class="sourceCode"><pre class="sourceCode r"><code><span class="r-in"><span><span class="va">f</span> <span class="op">&lt;-</span> <span class="fu">easel_dev</span><span class="op">(</span>width <span class="op">=</span> <span class="fl">6</span>, height <span class="op">=</span> <span class="fl">4</span>, fontname <span class="op">=</span> <span class="st">"Georgia"</span><span class="op">)</span></span></span>
 <span class="r-in"><span><span class="fu"><a href="https://rdrr.io/r/graphics/plot.default.html" class="external-link">plot</a></span><span class="op">(</span><span class="fl">1</span><span class="op">:</span><span class="fl">10</span>, <span class="op">(</span><span class="fl">1</span><span class="op">:</span><span class="fl">10</span><span class="op">)</span><span class="op">^</span><span class="fl">2</span>, type <span class="op">=</span> <span class="st">"b"</span><span class="op">)</span></span></span>
 <span class="r-in"><span><span class="fu"><a href="https://rdrr.io/r/grDevices/dev.html" class="external-link">dev.off</a></span><span class="op">(</span><span class="op">)</span></span></span>
-<span class="r-out co"><span class="r-pr">#&gt;</span> agg_record_1a096a72529d </span>
+<span class="r-out co"><span class="r-pr">#&gt;</span> agg_record_1a681f6f142b </span>
 <span class="r-out co"><span class="r-pr">#&gt;</span>                       2 </span>
 </code></pre></div>
     </div>
