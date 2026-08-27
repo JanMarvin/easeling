@@ -244,7 +244,10 @@ test_that("grid.path() with multiple sub-paths (a hole) renders both rings", {
     gp = grid::gpar(fill = "steelblue")
   )
   dev.off()
-  expect_equal(count_matches(f, "<a:path w="), 2)
+  # both rings live in ONE <a:path> (separate path elements are filled
+  # independently by renderers, which paints holes solid)
+  expect_equal(count_matches(f, "<a:path w="), 1)
+  expect_equal(count_matches(f, "<a:moveTo>"), 2)
   expect_equal(count_matches(f, "<a:close/>"), 2)
   expect_wellformed_fragment(f)
 })
@@ -252,6 +255,7 @@ test_that("grid.path() with multiple sub-paths (a hole) renders both rings", {
 # Gradients ----------------------------------------------------------------
 
 test_that("linearGradient fill emits a:gradFill with correct stops", {
+  skip_if_not(getRversion() >= "4.1.0")
   f <- easel_dev(width = 3, height = 3)
   grid::grid.newpage()
   grid::grid.rect(gp = grid::gpar(
@@ -266,6 +270,7 @@ test_that("linearGradient fill emits a:gradFill with correct stops", {
 })
 
 test_that("radialGradient fill emits a:gradFill with a circular path", {
+  skip_if_not(getRversion() >= "4.1.0")
   f <- easel_dev(width = 3, height = 3)
   grid::grid.newpage()
   grid::grid.circle(gp = grid::gpar(
@@ -372,44 +377,44 @@ test_that("lty=1 (solid) emits no dash element", {
   expect_false(grepl("custDash", txt))
 })
 
-test_that("lty=2 (dashed) emits prstDash val=dash", {
+test_that("lty=2 (dashed) emits its exact custDash pattern (dashed 4-4)", {
   f <- easel_dev(width = 3, height = 3)
   plot.new()
   abline(h = 0.5, lty = 2)
   dev.off()
-  expect_match(read_xml_text(f), 'val="dash"')
+  expect_match(read_xml_text(f), 'custDash.*d="400000" sp="400000"')
 })
 
-test_that("lty=3 (dotted) emits prstDash val=dot", {
+test_that("lty=3 (dotted) emits its exact custDash pattern (dotted 1-3)", {
   f <- easel_dev(width = 3, height = 3)
   plot.new()
   abline(h = 0.5, lty = 3)
   dev.off()
-  expect_match(read_xml_text(f), 'val="dot"')
+  expect_match(read_xml_text(f), 'custDash.*d="100000" sp="300000"')
 })
 
-test_that("lty=4 (dotdash) emits prstDash val=dashDot", {
+test_that("lty=4 (dotdash) emits its exact custDash pattern (dotdash 1-3-4-3)", {
   f <- easel_dev(width = 3, height = 3)
   plot.new()
   abline(h = 0.5, lty = 4)
   dev.off()
-  expect_match(read_xml_text(f), 'val="dashDot"')
+  expect_match(read_xml_text(f), 'custDash.*d="100000" sp="300000"/><a:ds d="400000" sp="300000"')
 })
 
-test_that("lty=5 (longdash) emits prstDash val=lgDash", {
+test_that("lty=5 (longdash) emits its exact custDash pattern (longdash 7-3)", {
   f <- easel_dev(width = 3, height = 3)
   plot.new()
   abline(h = 0.5, lty = 5)
   dev.off()
-  expect_match(read_xml_text(f), 'val="lgDash"')
+  expect_match(read_xml_text(f), 'custDash.*d="700000" sp="300000"')
 })
 
-test_that("lty=6 (twodash) emits prstDash val=lgDashDot", {
+test_that("lty=6 (twodash) emits its exact custDash pattern (twodash 2-2-6-2)", {
   f <- easel_dev(width = 3, height = 3)
   plot.new()
   abline(h = 0.5, lty = 6)
   dev.off()
-  expect_match(read_xml_text(f), 'val="lgDashDot"')
+  expect_match(read_xml_text(f), 'custDash.*d="200000" sp="200000"/><a:ds d="600000" sp="200000"')
 })
 
 test_that("custom lty string emits custDash with correct ds elements", {
@@ -428,17 +433,19 @@ test_that("custom lty string emits custDash with correct ds elements", {
   expect_equal(count_matches(f, "<a:ds "), 2)
 })
 
-test_that("all six named lty values produce distinct dash styles", {
-  patterns <- c('val="dash"', 'val="dot"', 'val="dashDot"',
-                'val="lgDash"', 'val="lgDashDot"')
+test_that("all named lty values emit custDash and are pairwise distinct", {
+  dashes <- character()
   for (lty_i in 2:6) {
     f <- easel_dev(width = 3, height = 3)
     plot.new()
     abline(h = 0.5, lty = lty_i)
     dev.off()
-    expect_match(read_xml_text(f), patterns[lty_i - 1],
-                 label = paste("lty =", lty_i))
+    txt <- read_xml_text(f)
+    m <- regmatches(txt, regexpr("<a:custDash>.*?</a:custDash>", txt))
+    expect_true(length(m) == 1, label = paste("lty =", lty_i))
+    dashes <- c(dashes, m)
   }
+  expect_equal(length(unique(dashes)), 5L)
 })
 
 # Geometry clipping ----------------------------------------------------------
@@ -788,4 +795,300 @@ test_that("par(bg=) paints a full-canvas background rect", {
   txt <- read_xml_text(f)
   expect_match(txt, 'val="FF00FF"')
   expect_match(txt, sprintf('cx="%.0f" cy="%.0f"', 3 * 914400, 2 * 914400))
+})
+
+# Remaining branches: validation, wb edge cases, stubs, string API ------------
+
+test_that("argument validation errors fire", {
+  expect_error(easel_dev(text_voff = 2), "text_voff")
+  expect_error(easel_size("A1:B2:C3"), "cell range")
+  expect_error(easel_size("A1", wb = 1), "wbWorkbook")
+})
+
+test_that("easel_size handles hidden and width-less cols, out-of-range and hidden rows", {
+  skip_if_not_installed("openxlsx2")
+  wb <- openxlsx2::wb_workbook()$add_worksheet()
+  wb$set_row_heights(rows = 50, heights = 99)          # outside queried range
+  ws <- wb$worksheets[[1]]
+  ws$cols_attr <- c('<col min="1" max="1" hidden="1" width="10"/>',
+                    '<col min="2" max="2" customWidth="1"/>')      # no width
+  ra <- ws$sheet_data$row_attr
+  hid <- ra[1, , drop = FALSE]; hid$r <- "2"; hid$ht <- ""; hid$hidden <- "1"
+  ws$sheet_data$row_attr <- rbind(ra, hid)
+  sz <- easel_size("A1:B2", wb)
+  # col A hidden -> 0 px; the width-less <col> entry leaves B at the default
+  expect_equal(unname(sz["width"]), 64 / 96)
+  # row 2 hidden -> only row 1 contributes
+  expect_equal(unname(sz["height"]), easel_size("A1", wb)[["height"]])
+})
+
+test_that("clipped multi-subpath grid.path re-strokes surviving outline pieces", {
+  f <- easel_dev(width = 3, height = 3)
+  grid::grid.path(x = c(-0.2, 0.5, 0.5, -0.2, 0.1, 0.3, 0.3, 0.1),
+                  y = c(0.2, 0.2, 0.6, 0.6, 0.3, 0.3, 0.5, 0.5),
+                  id = rep(1:2, each = 4),
+                  gp = grid::gpar(fill = "gold", col = "navy", lwd = 2))
+  dev.off()
+  txt <- read_xml_text(f)
+  expect_match(txt, "<a:ln><a:noFill/></a:ln>", fixed = TRUE)
+  expect_gte(count_matches(f, "<xdr:sp "), 3)   # fill + border runs
+})
+
+test_that("grid clip-path and mask stubs are callable", {
+  skip_if_not(getRversion() >= "4.1.0")
+  f <- easel_dev(width = 3, height = 3)
+  grid::grid.newpage()
+  grid::pushViewport(grid::viewport(clip = grid::circleGrob()))
+  grid::grid.rect(gp = grid::gpar(fill = "red"))
+  grid::popViewport()
+  dev.off()
+  expect_true(file.exists(f))
+})
+
+test_that("a failing write at close warns", {
+  skip_if_not(file.exists("/dev/full"))
+  f <- easel_dev("/dev/full", width = 3, height = 3)
+  plot(1)
+  expect_warning(dev.off(), "error writing")
+})
+
+test_that("easel_xml returns the raw string, identical to file output", {
+  xml <- easel_xml(plot(1:3), width = 3, height = 3)
+  expect_true(is.character(xml) && length(xml) == 1L)
+  expect_match(xml, "</xdr:wsDr>$")
+
+  f <- easel_dev(width = 3, height = 3)
+  plot(1:3)
+  dev.off()
+  expect_identical(paste(readLines(f, warn = FALSE), collapse = "\n"), xml)
+})
+
+test_that("easel_xml closes its device when code errors", {
+  n <- length(grDevices::dev.list())
+  expect_error(easel_xml(stop("boom"), width = 3, height = 3), "boom")
+  expect_equal(length(grDevices::dev.list()), n)
+})
+
+test_that("a path that vanishes before close warns instead of erroring", {
+  d <- tempfile()
+  dir.create(d)
+  f <- easel_dev(file.path(d, "gone.xml"), width = 3, height = 3)
+  plot(1)
+  unlink(d, recursive = TRUE)
+  expect_warning(dev.off(), "cannot open")
+})
+
+test_that("internal entry point rejects memory mode without an environment", {
+  expect_error(
+    .Call(easeling:::C_easeling_, NULL, 3, 3, 12, "Calibri",
+          FALSE, FALSE, 0.35, NULL, NULL),
+    "environment"
+  )
+})
+
+test_that("evenodd grid.path keeps its hole under the nonzero renderer rule", {
+  f <- easel_dev(width = 3, height = 3)
+  grid::grid.path(x = c(.1, .9, .9, .1, .35, .65, .65, .35),
+                  y = c(.1, .1, .9, .9, .35, .35, .65, .65),
+                  id = rep(1:2, each = 4), rule = "evenodd",
+                  gp = grid::gpar(fill = "seagreen"))
+  dev.off()
+  txt <- read_xml_text(f)
+  pts <- regmatches(txt, gregexpr('<a:pt x="[0-9-]+" y="[0-9-]+"/>', txt))[[1]]
+  # outer and inner rings must have opposite orientations for nonzero to
+  # cut the hole; check via signed area of the two 4-point rings
+  xy <- do.call(rbind, lapply(pts, function(p) {
+    as.numeric(regmatches(p, gregexpr("-?[0-9]+", p))[[1]])
+  }))
+  ring_area <- function(m) {
+    n <- nrow(m); j <- c(2:n, 1)
+    sum(m[, 1] * m[j, 2] - m[j, 1] * m[, 2]) / 2
+  }
+  n_bg <- nrow(xy) - 8   # any leading pts belong to other shapes (none here)
+  a1 <- ring_area(xy[n_bg + (1:4), , drop = FALSE])
+  a2 <- ring_area(xy[n_bg + (5:8), , drop = FALSE])
+  expect_lt(a1 * a2, 0)
+})
+
+
+# Optional font metrics -------------------------------------------------------
+
+test_that("user-supplied metrics drive string widths exactly", {
+  m <- list(widths = rep(1, 95), ascents = rep(0.7, 95), descents = rep(0.2, 95))
+  f <- easel_dev(width = 4, height = 3, metrics = m)
+  plot.new()
+  w <- strwidth("ABCD", units = "inches")
+  dev.off()
+  expect_equal(w * 72, 4 * 12)   # four 1-em glyphs at 12pt
+})
+
+test_that("invalid metrics are rejected", {
+  expect_error(easel_dev(metrics = list(widths = 1:95)), "widths, ascents, descents")
+  expect_error(easel_dev(metrics = list(widths = rep(-1, 95),
+                                        ascents = rep(0, 95),
+                                        descents = rep(0, 95))),
+               "finite non-negative")
+  expect_error(
+    .Call(easeling:::C_easeling_, NULL, 3, 3, 12, "Calibri",
+          FALSE, FALSE, 0.35, new.env(), c(1, 2, 3)),
+    "285")
+})
+
+test_that("metrics = FALSE forces the builtin table; systemfonts differs", {
+  skip_if_not_installed("systemfonts")
+  wid <- function(metrics) {
+    f <- easel_dev(width = 4, height = 3, fontname = "DejaVu Sans",
+                   metrics = metrics)
+    plot.new()
+    w <- strwidth("Hello Legend", units = "inches")
+    dev.off()
+    w
+  }
+  w_tab <- wid(FALSE)
+  w_sf <- wid(NULL)
+  expect_false(isTRUE(all.equal(w_tab, w_sf)))
+  gi <- systemfonts::glyph_info(strsplit("Hello Legend", "")[[1]],
+                                family = "DejaVu Sans", size = 1000)
+  expect_equal(w_sf * 72, sum(gi$x_advance) / 1000 * 12, tolerance = 1e-6)
+})
+
+test_that("without systemfonts the builtin metric tables are used", {
+  testthat::local_mocked_bindings(
+    has_systemfonts = function() FALSE, .package = "easeling"
+  )
+  f <- easel_dev(width = 4, height = 3)
+  plot.new()
+  text(0.5, 0.5, "gjpqy Aa.x-() Z_;:", adj = c(0.5, 0.5))
+  w <- strwidth("Hello", units = "inches")
+  dev.off()
+  expect_equal(w * 72, sum(c(0.722, 0.556, 0.222, 0.222, 0.556)) * 12,
+               tolerance = 0.2)   # Helvetica-like table, loose sanity bound
+  expect_true(file.exists(f))
+})
+
+# Shaped clip paths (R >= 4.1) ------------------------------------------------
+
+test_that("circle clip path clips fills and lines exactly", {
+  skip_if_not(getRversion() >= "4.1.0")
+  f <- easel_dev(width = 3, height = 3, metrics = FALSE)
+  grid::grid.newpage()
+  grid::pushViewport(grid::viewport(clip = grid::circleGrob(r = 0.3)))
+  grid::grid.rect(gp = grid::gpar(fill = "red", col = NA))
+  grid::grid.segments(0, 0.5, 1, 0.5, gp = grid::gpar(col = "black"))
+  grid::popViewport()
+  grid::grid.rect(x = .5, y = .5, width = .2, height = .1,
+                  gp = grid::gpar(fill = "blue", col = NA))
+  dev.off()
+  txt <- read_xml_text(f)
+  expect_equal(count_matches(f, "<a:custGeom>"), 2)  # clipped rect + line
+  expect_equal(count_matches(f, 'prst="rect"'), 1)   # post-pop rect unclipped
+  # the horizontal line must clip to the circle chord: x in [43.2, 172.8]pt
+  seg <- regmatches(txt, regexpr(
+    '<a:off x="[0-9]+" y="[0-9]+"/><a:ext cx="[0-9]+" cy="0"', txt))
+  n <- as.numeric(regmatches(seg, gregexpr("[0-9]+", seg))[[1]])
+  expect_equal(n[1] / 12700, 43.2, tolerance = 1e-6)
+  expect_equal(n[3] / 12700, 129.6, tolerance = 1e-6)
+})
+
+test_that("rect and polygon grobs work as clip paths", {
+  skip_if_not(getRversion() >= "4.1.0")
+  f <- easel_dev(width = 3, height = 3, metrics = FALSE)
+  grid::grid.newpage()
+  grid::pushViewport(grid::viewport(
+    clip = grid::rectGrob(width = 0.5, height = 0.5)))
+  grid::grid.circle(r = 0.45, gp = grid::gpar(fill = "gold", col = NA))
+  grid::popViewport()
+  dev.off()
+  bb <- data_shape_bboxes(f, 3, 3)
+  expect_lte(max(bb$x1), 3 * 0.75 + 1e-6)
+  expect_gte(min(bb$x0), 3 * 0.25 - 1e-6)
+
+  f <- easel_dev(width = 3, height = 3, metrics = FALSE)
+  grid::grid.newpage()
+  grid::pushViewport(grid::viewport(clip = grid::polygonGrob(
+    x = c(.5, .9, .1), y = c(.9, .1, .1))))
+  grid::grid.rect(gp = grid::gpar(fill = "seagreen", col = NA))
+  grid::popViewport()
+  dev.off()
+  expect_gte(count_matches(f, "<a:custGeom>"), 1)
+})
+
+test_that("non-convex, multi-ring, and oversized clip paths fall back to bbox", {
+  skip_if_not(getRversion() >= "4.1.0")
+  star <- grid::polygonGrob(
+    x = .5 + c(0, .1, .4, .16, .25, 0, -.25, -.16, -.4, -.1) ,
+    y = .5 + c(.4, .12, .12, -.05, -.32, -.13, -.32, -.05, .12, .12))
+  f <- easel_dev(width = 3, height = 3, metrics = FALSE)
+  grid::grid.newpage()
+  expect_warning(
+    { grid::pushViewport(grid::viewport(clip = star))
+      grid::grid.rect(gp = grid::gpar(fill = "red", col = NA))
+      grid::popViewport() },
+    "bounding box")
+  dev.off()
+
+  two <- grid::grobTree(grid::circleGrob(x = .3, r = .1),
+                        grid::circleGrob(x = .7, r = .1))
+  f <- easel_dev(width = 3, height = 3, metrics = FALSE)
+  grid::grid.newpage()
+  expect_warning(
+    { grid::pushViewport(grid::viewport(clip = two))
+      grid::grid.rect(gp = grid::gpar(fill = "red", col = NA))
+      grid::popViewport() },
+    "bounding box")
+  dev.off()
+
+  big <- grid::polygonGrob(x = .5 + .4 * cos(seq(0, 2*pi, length.out = 200)),
+                           y = .5 + .4 * sin(seq(0, 2*pi, length.out = 200)))
+  f <- easel_dev(width = 3, height = 3, metrics = FALSE)
+  grid::grid.newpage()
+  expect_warning(
+    { grid::pushViewport(grid::viewport(clip = big))
+      grid::grid.rect(gp = grid::gpar(fill = "red", col = NA))
+      grid::popViewport() },
+    "bounding box")
+  dev.off()
+})
+
+test_that("empty or erroring clip grobs leave the device usable", {
+  skip_if_not(getRversion() >= "4.1.0")
+  f <- easel_dev(width = 3, height = 3, metrics = FALSE)
+  grid::grid.newpage()
+  grid::pushViewport(grid::viewport(clip = grid::nullGrob()))
+  grid::grid.rect(gp = grid::gpar(fill = "red", col = NA))
+  grid::popViewport()
+  dev.off()
+  expect_gte(count_matches(f, "<xdr:sp "), 1)
+
+  assign("drawDetails.easelboom", function(x, recording) stop("boom"),
+         envir = globalenv())
+  on.exit(rm("drawDetails.easelboom", envir = globalenv()), add = TRUE)
+  f <- easel_dev(width = 3, height = 3, metrics = FALSE)
+  grid::grid.newpage()
+  try(suppressWarnings({
+    grid::pushViewport(grid::viewport(clip = grid::grob(cl = "easelboom")))
+    grid::grid.rect(gp = grid::gpar(fill = "red", col = NA))
+    grid::popViewport()
+  }), silent = TRUE)
+  dev.off()
+  expect_true(file.exists(f))
+})
+
+test_that("multi-subpath pathGrob clips via the path callback (bbox fallback)", {
+  skip_if_not(getRversion() >= "4.1.0")
+  f <- easel_dev(width = 3, height = 3, metrics = FALSE)
+  grid::grid.newpage()
+  expect_warning({
+    grid::pushViewport(grid::viewport(clip = grid::pathGrob(
+      x = c(.1, .4, .4, .1, .6, .9, .9, .6),
+      y = c(.2, .2, .8, .8, .2, .2, .8, .8),
+      id = rep(1:2, each = 4))))
+    grid::grid.rect(gp = grid::gpar(fill = "purple", col = NA))
+    grid::popViewport()
+  }, "bounding box")
+  dev.off()
+  bb <- data_shape_bboxes(f, 3, 3)
+  tol <- 1e-6
+  expect_lte(max(bb$x1), 3 * 0.9 + tol)   # combined bbox of both rings
+  expect_gte(min(bb$y0), 3 * 0.2 - tol)
 })

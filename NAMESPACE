@@ -2,4 +2,5 @@
 
 export(easel_dev)
 export(easel_size)
+export(easel_xml)
 useDynLib(easeling, .registration=TRUE, .fixes="C_")

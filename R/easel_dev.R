@@ -15,6 +15,8 @@
 #'   actual font name (e.g. `par(family = "Georgia")` or
 #'   `theme_minimal(base_family = "Georgia")`), that takes priority over
 #'   this default.
+#' @param file Path of the XML file to write. Defaults to a temp file.
+#'   For a plain string instead of a file, see [easel_xml()].
 #' @param dims Optionally, a cell range such as `"A1:G15"`. If given,
 #'   `width` and `height` are ignored and computed from the region via
 #'   [easel_size()], so the plot fills that region exactly when later
@@ -22,6 +24,16 @@
 #' @param wb,sheet Passed to [easel_size()] when `dims` is given: the
 #'   `openxlsx2` workbook (and sheet) to read actual column widths and row
 #'   heights from.
+#' @param metrics Font metrics used for text layout (string widths,
+#'   vertical centring, margins). `NULL` (default): use real metrics for
+#'   `fontname` via the `systemfonts` package when it is installed,
+#'   otherwise the built-in Calibri-like table. `FALSE`: always use the
+#'   built-in table. Or a list with numeric components `widths`,
+#'   `ascents`, `descents`, each of length 95 giving em fractions for the
+#'   ASCII characters 32..126. Metrics only affect what R computes -
+#'   rendering is always done by the spreadsheet application with the real
+#'   font - but better metrics mean legend boxes, margins, and centring
+#'   are sized for the text that will actually appear.
 #' @param text_voff Vertical text calibration in em: text boxes are
 #'   centre-anchored, and the baseline is placed `text_voff` em below the
 #'   box centre. The default `0.35` was calibrated against Excel's line layout for
@@ -47,8 +59,20 @@
 easel_dev <- function(file = tempfile(fileext = ".xml"), width = 6, height = 6,
                      pointsize = 12, fontname = "Calibri",
                      underline = FALSE, strikeout = FALSE,
-                     dims = NULL, wb = NULL, sheet = 1, text_voff = 0.35) {
+                     dims = NULL, wb = NULL, sheet = 1, text_voff = 0.35,
+                     metrics = NULL) {
   file <- path.expand(file[1L])
+  easel_dev_impl(file, NULL, width = width, height = height, metrics = metrics,
+                 pointsize = pointsize, fontname = fontname,
+                 underline = underline, strikeout = strikeout,
+                 dims = dims, wb = wb, sheet = sheet, text_voff = text_voff)
+}
+
+easel_dev_impl <- function(file, env, width = 6, height = 6,
+                     pointsize = 12, fontname = "Calibri",
+                     underline = FALSE, strikeout = FALSE,
+                     dims = NULL, wb = NULL, sheet = 1, text_voff = 0.35,
+                     metrics = NULL) {
   if (!is.null(dims)) {
     sz <- easel_size(dims, wb = wb, sheet = sheet)
     width <- sz[["width"]]; height <- sz[["height"]]
@@ -67,8 +91,37 @@ easel_dev <- function(file = tempfile(fileext = ".xml"), width = 6, height = 6,
     stop("'text_voff' must be a finite value in [-1, 1]")
   invisible(.Call(C_easeling_, file, width, height, pointsize, fontname,
                   isTRUE(as.logical(underline[1L])),
-                  isTRUE(as.logical(strikeout[1L])), text_voff))
+                  isTRUE(as.logical(strikeout[1L])), text_voff, env,
+                  resolve_metrics(metrics, fontname)))
   invisible(file)
+}
+
+#' Render plotting code straight to a DrawingML string
+#'
+#' Evaluates `code` on an in-memory easeling device and returns the
+#' resulting drawing as a single character string - no file is involved.
+#' The device is opened before and closed after `code`, also on error.
+#'
+#' @param code Plotting code; a braced block for multiple statements.
+#'   Remember that ggplot2/tmap/lattice objects only draw when printed,
+#'   so wrap them in `print()`.
+#' @param ... Passed to [easel_dev()] (everything except `file`).
+#'
+#' @return The DrawingML as a length-one character vector, ready for
+#'   `openxlsx2::wb_add_drawing(xml = )`.
+#' @export
+#'
+#' @examples
+#' xml <- easel_xml(plot(1:10), width = 4, height = 3)
+easel_xml <- function(code, ...) {
+  env <- new.env(parent = emptyenv())
+  easel_dev_impl(NULL, env, ...)
+  id <- grDevices::dev.cur()
+  on.exit(if (id %in% grDevices::dev.list()) grDevices::dev.off(id),
+          add = TRUE)
+  code
+  grDevices::dev.off(id)
+  get("xml", envir = env, inherits = FALSE)
 }
 
 #' Compute the device size for a spreadsheet cell region
@@ -163,4 +216,35 @@ easel_size <- function(dims, wb = NULL, sheet = 1) {
   col_px <- ifelse(col_chars <= 0, 0, trunc(col_chars * 7 + 0.5) + 5)
   row_px <- round(row_ht * 4 / 3)
   c(width = sum(col_px) / 96, height = sum(row_px) / 96)
+}
+
+
+
+resolve_metrics <- function(metrics, fontname) {
+  if (isFALSE(metrics)) return(NULL)
+  if (!is.null(metrics)) {
+    if (!is.list(metrics) ||
+        !all(c("widths", "ascents", "descents") %in% names(metrics)))
+      stop("'metrics' must be FALSE or a list with widths, ascents, descents")
+    v <- c(as.double(metrics$widths), as.double(metrics$ascents),
+           as.double(metrics$descents))
+    if (length(v) != 285L || anyNA(v) || any(!is.finite(v)) || any(v < 0))
+      stop("'metrics' components must be finite non-negative, length 95 each")
+    return(v)
+  }
+  if (!has_systemfonts()) return(NULL)
+  gi <- tryCatch(
+    systemfonts::glyph_info(intToUtf8(32:126, multiple = TRUE),
+                            family = fontname, size = 1000),
+    error = function(e) NULL                                  # nocov
+  )
+  if (is.null(gi) || nrow(gi) != 95L) return(NULL)            # nocov
+  bb <- do.call(rbind, gi$bbox)
+  v <- c(gi$x_advance, pmax(bb[, "ymax"], 0), pmax(-bb[, "ymin"], 0)) / 1000
+  if (anyNA(v) || any(!is.finite(v)) || any(v < 0)) return(NULL) # nocov
+  v
+}
+
+has_systemfonts <- function() {
+  requireNamespace("systemfonts", quietly = TRUE)
 }

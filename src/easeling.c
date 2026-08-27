@@ -6,18 +6,67 @@
 #include <R_ext/Rdynload.h>
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
 #define PT_TO_EMU 12700.0
 
+/* Growable in-memory output buffer. The whole drawing is assembled here
+ and only written to disk at close when a path was given; without one it
+ is handed back to R as a string. Plain C99, no open_memstream (absent
+ on Windows). */
 typedef struct {
-  FILE *out;
+  char *data;
+  size_t len, cap;
+} membuf;
+
+static void mb_reserve(membuf *b, size_t extra) {
+  if (b->len + extra + 1 <= b->cap) return;
+  size_t cap = b->cap ? b->cap : 16384;
+  while (b->len + extra + 1 > cap) cap *= 2;
+  char *p = realloc(b->data, cap);
+  if (p == NULL) {                       /* # nocov start */
+    free(b->data);
+    b->data = NULL; b->len = b->cap = 0;
+    Rf_error("easeling: out of memory");
+  }                                      /* # nocov end */
+  b->data = p;
+  b->cap = cap;
+}
+
+static void mb_printf(membuf *b, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  va_list ap2;
+  va_copy(ap2, ap);
+  int n = vsnprintf(NULL, 0, fmt, ap);
+  va_end(ap);
+  if (n < 0) { va_end(ap2); Rf_error("easeling: formatting error"); } /* # nocov */
+  mb_reserve(b, (size_t) n);
+  vsnprintf(b->data + b->len, (size_t) n + 1, fmt, ap2);
+  va_end(ap2);
+  b->len += (size_t) n;
+}
+
+typedef struct {
+  membuf out;
+  char *path;      /* NULL: return the drawing as a string via result_env */
+  SEXP result_env;
   int shape_id;
   int page;
   double clip_x0, clip_y0, clip_x1, clip_y1;
   char fontname[201];
+  /* shaped clip path (R >= 4.1 viewport(clip = grob)): one convex ring,
+   captured by replaying the clip grob through the draw callbacks */
+#define CLIP_RING_MAX 128
+  int capturing, clip_shaped, cap_fail, ring_n;
+  double ring_x[CLIP_RING_MAX], ring_y[CLIP_RING_MAX];
+  double cap_bx0, cap_by0, cap_bx1, cap_by1;   /* bbox of ALL captured ink */
+  int cap_any;
+  double cw[95], ca[95], cd2[95];  /* optional per-char metrics, em */
+  int have_metrics;
   double text_voff;
   Rboolean underline;
   Rboolean strikeout;
@@ -56,17 +105,17 @@ static int alpha_pct(int col) {
   return (int) lround(R_ALPHA(col) / 255.0 * 100000.0);
 }
 
-static void srgb_clr(FILE *out, int col) {
+static void srgb_clr(membuf *out, int col) {
   int a = alpha_pct(col);
   if (a >= 100000)
-    fprintf(out, "<a:srgbClr val=\"%06X\"/>", rgb_hex(col));
+    mb_printf(out, "<a:srgbClr val=\"%06X\"/>", rgb_hex(col));
   else
-    fprintf(out, "<a:srgbClr val=\"%06X\"><a:alpha val=\"%d\"/></a:srgbClr>",
+    mb_printf(out, "<a:srgbClr val=\"%06X\"><a:alpha val=\"%d\"/></a:srgbClr>",
             rgb_hex(col), a);
 }
 
 static void sp_open(xdrDesc *d, const char *name) {
-  fprintf(d->out,
+  mb_printf(&d->out,
           "<xdr:sp macro=\"\" textlink=\"\">"
             "<xdr:nvSpPr><xdr:cNvPr id=\"%d\" name=\"%s\"/><xdr:cNvSpPr/></xdr:nvSpPr>",
               d->shape_id++, name);
@@ -78,47 +127,50 @@ static void xfrm(xdrDesc *d, double x1, double y1, double x2, double y2) {
   double cx = fabs(x2 - x1) * PT_TO_EMU;
   double cy = fabs(y2 - y1) * PT_TO_EMU;
 
-  fprintf(d->out, "<a:xfrm><a:off x=\"%.0f\" y=\"%.0f\"/><a:ext cx=\"%.0f\" cy=\"%.0f\"/></a:xfrm>",
+  mb_printf(&d->out, "<a:xfrm><a:off x=\"%.0f\" y=\"%.0f\"/><a:ext cx=\"%.0f\" cy=\"%.0f\"/></a:xfrm>",
           min_x * PT_TO_EMU, min_y * PT_TO_EMU, cx, cy);
 }
 
 static void fill_props(xdrDesc *d, int fill) {
   if (fill == NA_INTEGER || R_TRANSPARENT(fill)) {
-    fprintf(d->out, "<a:noFill/>");
+    mb_printf(&d->out, "<a:noFill/>");
   } else {
-    fprintf(d->out, "<a:solidFill>");
-    srgb_clr(d->out, fill);
-    fprintf(d->out, "</a:solidFill>");
+    mb_printf(&d->out, "<a:solidFill>");
+    srgb_clr(&d->out, fill);
+    mb_printf(&d->out, "</a:solidFill>");
   }
 }
 
+#if R_GE_version >= 13
 static void emit_gradient_stops_linear(xdrDesc *d, SEXP pattern) {
   int n = R_GE_linearGradientNumStops(pattern);
-  fprintf(d->out, "<a:gsLst>");
+  mb_printf(&d->out, "<a:gsLst>");
   for (int i = 0; i < n; i++) {
     double stop = R_GE_linearGradientStop(pattern, i);
     rcolor col = R_GE_linearGradientColour(pattern, i);
-    fprintf(d->out, "<a:gs pos=\"%d\">", (int) lround(stop * 100000.0));
-    srgb_clr(d->out, (int) col);
-    fprintf(d->out, "</a:gs>");
+    mb_printf(&d->out, "<a:gs pos=\"%d\">", (int) lround(stop * 100000.0));
+    srgb_clr(&d->out, (int) col);
+    mb_printf(&d->out, "</a:gs>");
   }
-  fprintf(d->out, "</a:gsLst>");
+  mb_printf(&d->out, "</a:gsLst>");
 }
 
 static void emit_gradient_stops_radial(xdrDesc *d, SEXP pattern) {
   int n = R_GE_radialGradientNumStops(pattern);
-  fprintf(d->out, "<a:gsLst>");
+  mb_printf(&d->out, "<a:gsLst>");
   for (int i = 0; i < n; i++) {
     double stop = R_GE_radialGradientStop(pattern, i);
     rcolor col = R_GE_radialGradientColour(pattern, i);
-    fprintf(d->out, "<a:gs pos=\"%d\">", (int) lround(stop * 100000.0));
-    srgb_clr(d->out, (int) col);
-    fprintf(d->out, "</a:gs>");
+    mb_printf(&d->out, "<a:gs pos=\"%d\">", (int) lround(stop * 100000.0));
+    srgb_clr(&d->out, (int) col);
+    mb_printf(&d->out, "</a:gs>");
   }
-  fprintf(d->out, "</a:gsLst>");
+  mb_printf(&d->out, "</a:gsLst>");
 }
+#endif
 
 static void fill_props_gc(xdrDesc *d, const pGEcontext gc) {
+#if R_GE_version >= 13
   if (gc->patternFill != R_NilValue && R_GE_isPattern(gc->patternFill)) {
     int type = R_GE_patternType(gc->patternFill);
     if (type == R_GE_linearGradientPattern) {
@@ -129,22 +181,23 @@ static void fill_props_gc(xdrDesc *d, const pGEcontext gc) {
       double ang_deg = atan2(y2 - y1, x2 - x1) * 180.0 / M_PI;
       if (ang_deg < 0) ang_deg += 360.0;
       int ang_60000 = (int) round(ang_deg * 60000.0);
-      fprintf(d->out, "<a:gradFill>");
+      mb_printf(&d->out, "<a:gradFill>");
       emit_gradient_stops_linear(d, gc->patternFill);
-      fprintf(d->out, "<a:lin ang=\"%d\" scaled=\"0\"/></a:gradFill>", ang_60000);
+      mb_printf(&d->out, "<a:lin ang=\"%d\" scaled=\"0\"/></a:gradFill>", ang_60000);
       return;
     } else if (type == R_GE_radialGradientPattern) {
-      fprintf(d->out, "<a:gradFill>");
+      mb_printf(&d->out, "<a:gradFill>");
       emit_gradient_stops_radial(d, gc->patternFill);
-      fprintf(d->out,
+      mb_printf(&d->out,
               "<a:path path=\"circle\"><a:fillToRect l=\"50000\" t=\"50000\" "
               "r=\"50000\" b=\"50000\"/></a:path></a:gradFill>");
       return;
     }
     /* tiling patterns have no clean OOXML equivalent - fall through to noFill */
-    fprintf(d->out, "<a:noFill/>");
+    mb_printf(&d->out, "<a:noFill/>");
     return;
   }
+#endif
   fill_props(d, gc->fill);
 }
 
@@ -157,16 +210,13 @@ static void fill_props_gc(xdrDesc *d, const pGEcontext gc) {
  LTY_LONGDASH = 7 + (3<<4)
  LTY_TWODASH  = 2 + (2<<4) + (6<<8) + (2<<12)
  We match named presets first to get nicer OOXML, then fall through to custDash. */
-static void emit_dash(FILE *out, int lty, double lwd) {
+static void emit_dash(membuf *out, int lty, double lwd) {
   (void) lwd;
   if (lty == LTY_SOLID) return;
-  if (lty == LTY_DASHED)   { fprintf(out, "<a:prstDash val=\"dash\"/>");      return; }
-  if (lty == LTY_DOTTED)   { fprintf(out, "<a:prstDash val=\"dot\"/>");       return; }
-  if (lty == LTY_DOTDASH)  { fprintf(out, "<a:prstDash val=\"dashDot\"/>");   return; }
-  if (lty == LTY_LONGDASH) { fprintf(out, "<a:prstDash val=\"lgDash\"/>");    return; }
-  if (lty == LTY_TWODASH)  { fprintf(out, "<a:prstDash val=\"lgDashDot\"/>"); return; }
-
-  /* Custom: extract nibbles, emit custDash. OOXML <a:ds d= sp=> are
+  /* All non-solid patterns as custDash from the R nibble encoding: the
+   prstDash presets render at renderer-specific proportions that don't
+   match R's actual patterns (dashed = 4-4, dotted = 1-3, ...), while
+   custDash reproduces them exactly. OOXML <a:ds d= sp=> are
    ST_PositivePercentage of the line width in 1000ths of a percent,
    i.e. one line-width = 100000. R nibbles are dash/gap lengths in
    line-width units. */
@@ -179,18 +229,18 @@ static void emit_dash(FILE *out, int lty, double lwd) {
   }
   if (count < 2) count = 2;
   if (count & 1) count++;
-  fprintf(out, "<a:custDash>");
+  mb_printf(out, "<a:custDash>");
   for (int i = 0; i + 1 < count; i += 2) {
     int d_val  = (nib[i]   > 0 ? nib[i]   : 1) * 100000;
     int sp_val = (nib[i+1] > 0 ? nib[i+1] : 1) * 100000;
-    fprintf(out, "<a:ds d=\"%d\" sp=\"%d\"/>", d_val, sp_val);
+    mb_printf(out, "<a:ds d=\"%d\" sp=\"%d\"/>", d_val, sp_val);
   }
-  fprintf(out, "</a:custDash>");
+  mb_printf(out, "</a:custDash>");
 }
 
 static void line_props(xdrDesc *d, int col, double lwd, int lty, int lend, int ljoin, double lmitre) {
   if (col == NA_INTEGER || R_TRANSPARENT(col) || lty == LTY_BLANK) {
-    fprintf(d->out, "<a:ln><a:noFill/></a:ln>");
+    mb_printf(&d->out, "<a:ln><a:noFill/></a:ln>");
     return;
   }
   double w_emu = (lwd > 0 ? lwd : 1.0) * 0.75 * PT_TO_EMU;
@@ -199,28 +249,28 @@ static void line_props(xdrDesc *d, int col, double lwd, int lty, int lend, int l
   if      (lend == GE_BUTT_CAP)   cap = "flat";
   else if (lend == GE_SQUARE_CAP) cap = "sq";
 
-  fprintf(d->out, "<a:ln w=\"%.0f\" cap=\"%s\"><a:solidFill>", w_emu, cap);
-  srgb_clr(d->out, col);
-  fprintf(d->out, "</a:solidFill>");
-  emit_dash(d->out, lty, lwd);
+  mb_printf(&d->out, "<a:ln w=\"%.0f\" cap=\"%s\"><a:solidFill>", w_emu, cap);
+  srgb_clr(&d->out, col);
+  mb_printf(&d->out, "</a:solidFill>");
+  emit_dash(&d->out, lty, lwd);
 
   switch (ljoin) {
-  case GE_BEVEL_JOIN: fprintf(d->out, "<a:bevel/>"); break;
+  case GE_BEVEL_JOIN: mb_printf(&d->out, "<a:bevel/>"); break;
   case GE_MITRE_JOIN:
     /* OOXML miter lim is ST_PositivePercentage of line width; R's lmitre
      is a plain ratio, so ratio * 100000 */
-    fprintf(d->out, "<a:miter lim=\"%.0f\"/>", lmitre * 100000.0);
+    mb_printf(&d->out, "<a:miter lim=\"%.0f\"/>", lmitre * 100000.0);
     break;
-  default: fprintf(d->out, "<a:round/>"); break;
+  default: mb_printf(&d->out, "<a:round/>"); break;
   }
 
-  fprintf(d->out, "</a:ln>");
+  mb_printf(&d->out, "</a:ln>");
 }
 
 static void points_to_pts(xdrDesc *d, const double *x, const double *y, int n,
                           double x0, double y0, double w_emu, double h_emu,
                           Rboolean closed) {
-  fprintf(d->out,
+  mb_printf(&d->out,
           "<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/>"
           "<a:rect l=\"0\" t=\"0\" r=\"%.0f\" b=\"%.0f\"/><a:pathLst>"
           "<a:path w=\"%.0f\" h=\"%.0f\">",
@@ -229,12 +279,12 @@ static void points_to_pts(xdrDesc *d, const double *x, const double *y, int n,
   for (int i = 0; i < n; i++) {
     double px = (x[i] * PT_TO_EMU) - x0;
     double py = (y[i] * PT_TO_EMU) - y0;
-    fprintf(d->out, "<a:%s><a:pt x=\"%.0f\" y=\"%.0f\"/></a:%s>",
+    mb_printf(&d->out, "<a:%s><a:pt x=\"%.0f\" y=\"%.0f\"/></a:%s>",
             i == 0 ? "moveTo" : "lnTo", px, py,
             i == 0 ? "moveTo" : "lnTo");
   }
-  if (closed) fprintf(d->out, "<a:close/>");
-  fprintf(d->out, "</a:path></a:pathLst></a:custGeom>");
+  if (closed) mb_printf(&d->out, "<a:close/>");
+  mb_printf(&d->out, "</a:path></a:pathLst></a:custGeom>");
 }
 
 static Rboolean fully_outside_clip(xdrDesc *d, double x0, double y0, double x1, double y1) {
@@ -244,7 +294,11 @@ static Rboolean fully_outside_clip(xdrDesc *d, double x0, double y0, double x1, 
   double cy1 = fmax(d->clip_y0, d->clip_y1);
   double bx0 = fmin(x0, x1), bx1 = fmax(x0, x1);
   double by0 = fmin(y0, y1), by1 = fmax(y0, y1);
-  return (bx1 < cx0 || bx0 > cx1 || by1 < cy0 || by0 > cy1) ? TRUE : FALSE;
+  if (bx1 < cx0 || bx0 > cx1 || by1 < cy0 || by0 > cy1) return TRUE;
+  if (d->clip_shaped &&
+      (bx1 < d->cap_bx0 || bx0 > d->cap_bx1 ||
+       by1 < d->cap_by0 || by0 > d->cap_by1)) return TRUE;
+  return FALSE;
 }
 
 /* Liang-Barsky line clipping. Returns FALSE if the segment is entirely
@@ -321,6 +375,133 @@ static int clip_polygon_sh(const double *x, const double *y, int n,
   return m;
 }
 
+/* ---- shaped (convex-ring) clipping ---------------------------------- */
+
+static int ring_is_convex(const double *x, const double *y, int n) {
+  int pos = 0, neg = 0;
+  for (int i = 0; i < n; i++) {
+    int j = (i + 1) % n, k = (i + 2) % n;
+    double c = (x[j] - x[i]) * (y[k] - y[j]) - (y[j] - y[i]) * (x[k] - x[j]);
+    if (c > 1e-12) pos = 1;
+    if (c < -1e-12) neg = 1;
+    if (pos && neg) return 0;
+  }
+  return 1;
+}
+
+static void capture_ring(xdrDesc *d, const double *x, const double *y, int n) {
+  for (int i = 0; i < n; i++) {
+    if (!d->cap_any || x[i] < d->cap_bx0) d->cap_bx0 = x[i];
+    if (!d->cap_any || x[i] > d->cap_bx1) d->cap_bx1 = x[i];
+    if (!d->cap_any || y[i] < d->cap_by0) d->cap_by0 = y[i];
+    if (!d->cap_any || y[i] > d->cap_by1) d->cap_by1 = y[i];
+    d->cap_any = 1;
+  }
+  if (d->ring_n > 0 || n < 3 || n > CLIP_RING_MAX) { d->cap_fail = 1; return; }
+  for (int i = 0; i < n; i++) { d->ring_x[i] = x[i]; d->ring_y[i] = y[i]; }
+  d->ring_n = n;
+}
+
+/* Sutherland-Hodgman against one directed ring edge; inside is where
+ cross(edge, q - p) <= 0 (rings are normalised to negative signed area). */
+static int sh_clip_ring_edge(const double *ix, const double *iy, int n,
+                             double px, double py, double ex, double ey,
+                             double *ox, double *oy) {
+  int m = 0;
+  double dx = ex - px, dy = ey - py;
+  for (int i = 0; i < n; i++) {
+    int j = (i + 1) % n;
+    double fa = dx * (iy[i] - py) - dy * (ix[i] - px);
+    double fb = dx * (iy[j] - py) - dy * (ix[j] - px);
+    int ina = fa <= 0.0, inb = fb <= 0.0;
+    if (ina) { ox[m] = ix[i]; oy[m] = iy[i]; m++; }
+    if (ina != inb) {
+      double t = fa / (fa - fb);
+      ox[m] = ix[i] + t * (ix[j] - ix[i]);
+      oy[m] = iy[i] + t * (iy[j] - iy[i]);
+      m++;
+    }
+  }
+  return m;
+}
+
+static int clip_polygon_ring(const double *x, const double *y, int n,
+                             const double *rx, const double *ry, int rn,
+                             double *buf1x, double *buf1y,
+                             double *buf2x, double *buf2y,
+                             double **ox, double **oy) {
+  for (int i = 0; i < n; i++) { buf1x[i] = x[i]; buf1y[i] = y[i]; }
+  int m = n;
+  double *ax = buf1x, *ay = buf1y, *bx = buf2x, *by = buf2y;
+  for (int e = 0; e < rn; e++) {
+    int f = (e + 1) % rn;
+    m = sh_clip_ring_edge(ax, ay, m, rx[e], ry[e], rx[f], ry[f], bx, by);
+    double *t;
+    t = ax; ax = bx; bx = t;
+    t = ay; ay = by; by = t;
+    if (m == 0) break;
+  }
+  *ox = ax; *oy = ay;
+  return m;
+}
+
+/* Cyrus-Beck: clip a segment to the convex ring; FALSE if fully outside. */
+static Rboolean clip_line_ring(const xdrDesc *d, double *x1, double *y1,
+                               double *x2, double *y2) {
+  double t0 = 0.0, t1 = 1.0;
+  double sx = *x1, sy = *y1, dxs = *x2 - *x1, dys = *y2 - *y1;
+  for (int e = 0; e < d->ring_n; e++) {
+    int f = (e + 1) % d->ring_n;
+    double px = d->ring_x[e], py = d->ring_y[e];
+    double dx = d->ring_x[f] - px, dy = d->ring_y[f] - py;
+    double fa = dx * (sy - py) - dy * (sx - px);
+    double fb = dx * (sy + dys - py) - dy * (sx + dxs - px);
+    if (fa > 0.0 && fb > 0.0) return FALSE;
+    if (fa > 0.0 || fb > 0.0) {
+      double t = fa / (fa - fb);
+      if (fa > 0.0) { if (t > t0) t0 = t; }
+      else          { if (t < t1) t1 = t; }
+      if (t0 > t1) return FALSE;
+    }
+  }
+  *x1 = sx + t0 * dxs; *y1 = sy + t0 * dys;
+  *x2 = sx + t1 * dxs; *y2 = sy + t1 * dys;
+  return TRUE;
+}
+
+/* Dispatchers: rectangle clip first, then the shaped ring when active. */
+static Rboolean dev_clip_line(const xdrDesc *d, double *x1, double *y1,
+                              double *x2, double *y2) {
+  double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
+  double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
+  if (!clip_line_lb(cx0, cy0, cx1, cy1, x1, y1, x2, y2)) return FALSE;
+  if (d->clip_shaped) return clip_line_ring(d, x1, y1, x2, y2);
+  return TRUE;
+}
+
+/* Clips against the rect and (if active) the ring; buffers via R_alloc.
+ Returns vertex count; *ox/*oy point into the result. */
+static int dev_clip_polygon(const xdrDesc *d, const double *x, const double *y,
+                            int n, double **ox, double **oy) {
+  double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
+  double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
+  int cap = 2 * (n + 4 + (d->clip_shaped ? d->ring_n : 0)) + 8;
+  double *b1x = (double *) R_alloc((size_t) cap, sizeof(double));
+  double *b1y = (double *) R_alloc((size_t) cap, sizeof(double));
+  double *b2x = (double *) R_alloc((size_t) cap, sizeof(double));
+  double *b2y = (double *) R_alloc((size_t) cap, sizeof(double));
+  int m = clip_polygon_sh(x, y, n, cx0, cy0, cx1, cy1, b1x, b1y, b2x, b2y, ox, oy);
+  if (m > 0 && d->clip_shaped) {
+    double *b3x = (double *) R_alloc((size_t) cap, sizeof(double));
+    double *b3y = (double *) R_alloc((size_t) cap, sizeof(double));
+    double *b4x = (double *) R_alloc((size_t) cap, sizeof(double));
+    double *b4y = (double *) R_alloc((size_t) cap, sizeof(double));
+    m = clip_polygon_ring(*ox, *oy, m, d->ring_x, d->ring_y, d->ring_n,
+                          b3x, b3y, b4x, b4y, ox, oy);
+  }
+  return m;
+}
+
 static void bbox(const double *x, const double *y, int n, double *x0, double *y0,
                  double *x1, double *y1) {
   *x0 = *x1 = x[0]; *y0 = *y1 = y[0];
@@ -337,13 +518,13 @@ static void emit_polyline_shape(xdrDesc *d, const double *x, const double *y,
   double x0, y0, x1, y1;
   bbox(x, y, n, &x0, &y0, &x1, &y1);
   sp_open(d, "");
-  fprintf(d->out, "<xdr:spPr>");
+  mb_printf(&d->out, "<xdr:spPr>");
   xfrm(d, x0, y0, x1, y1);
   points_to_pts(d, x, y, n, x0 * PT_TO_EMU, y0 * PT_TO_EMU,
                 (x1 - x0) * PT_TO_EMU, (y1 - y0) * PT_TO_EMU, FALSE);
-  fprintf(d->out, "<a:noFill/>");
+  mb_printf(&d->out, "<a:noFill/>");
   line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
-  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
+  mb_printf(&d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
 }
 
 /* Clip an open polyline and emit it as one shape per maximal visible run,
@@ -354,8 +535,6 @@ static void emit_clipped_polyline(xdrDesc *d, const double *x, const double *y,
   if (n < 2) return;
   if (gc->col == NA_INTEGER || R_TRANSPARENT(gc->col) || gc->lty == LTY_BLANK)
     return;
-  double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
-  double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
 
   double *rx = (double *) R_alloc((size_t) n, sizeof(double));
   double *ry = (double *) R_alloc((size_t) n, sizeof(double));
@@ -364,7 +543,7 @@ static void emit_clipped_polyline(xdrDesc *d, const double *x, const double *y,
 
   for (int i = 0; i < n - 1; i++) {
     double ax = x[i], ay = y[i], bx = x[i + 1], by = y[i + 1];
-    if (!clip_line_lb(cx0, cy0, cx1, cy1, &ax, &ay, &bx, &by)) {
+    if (!dev_clip_line(d, &ax, &ay, &bx, &by)) {
       if (m >= 2) emit_polyline_shape(d, rx, ry, m, gc);
       m = 0;
       continue;
@@ -385,7 +564,7 @@ static void emit_polygon_shape(xdrDesc *d, const double *x, const double *y,
   double x0, y0, x1, y1;
   bbox(x, y, m, &x0, &y0, &x1, &y1);
   sp_open(d, "");
-  fprintf(d->out, "<xdr:spPr>");
+  mb_printf(&d->out, "<xdr:spPr>");
   xfrm(d, x0, y0, x1, y1);
   points_to_pts(d, x, y, m, x0 * PT_TO_EMU, y0 * PT_TO_EMU,
                 (x1 - x0) * PT_TO_EMU, (y1 - y0) * PT_TO_EMU, TRUE);
@@ -393,8 +572,8 @@ static void emit_polygon_shape(xdrDesc *d, const double *x, const double *y,
   if (with_border)
     line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
   else
-    fprintf(d->out, "<a:ln><a:noFill/></a:ln>");
-  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
+    mb_printf(&d->out, "<a:ln><a:noFill/></a:ln>");
+  mb_printf(&d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
 }
 
 /* Clip a closed ring and emit it. If the clip actually cut the ring, the
@@ -404,17 +583,8 @@ static void emit_polygon_shape(xdrDesc *d, const double *x, const double *y,
 static void emit_clipped_ring(xdrDesc *d, const double *x, const double *y,
                               int n, const pGEcontext gc) {
   if (n < 2) return;
-  double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
-  double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
-
-  int cap = (n + 4) * 4;
-  double *buf1x = (double *) R_alloc((size_t) cap, sizeof(double));
-  double *buf1y = (double *) R_alloc((size_t) cap, sizeof(double));
-  double *buf2x = (double *) R_alloc((size_t) cap, sizeof(double));
-  double *buf2y = (double *) R_alloc((size_t) cap, sizeof(double));
   double *ox, *oy;
-  int m = clip_polygon_sh(x, y, n, cx0, cy0, cx1, cy1,
-                          buf1x, buf1y, buf2x, buf2y, &ox, &oy);
+  int m = dev_clip_polygon(d, x, y, n, &ox, &oy);
   if (m < 2) return;
 
   int cut = (m != n);
@@ -438,23 +608,19 @@ static void emit_clipped_ring(xdrDesc *d, const double *x, const double *y,
 }
 
 static void emit_filled_quad(xdrDesc *d, const double *qx, const double *qy, int col) {
-  double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
-  double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
-  double buf1x[32], buf1y[32], buf2x[32], buf2y[32];
   double *ox, *oy;
-  int m = clip_polygon_sh(qx, qy, 4, cx0, cy0, cx1, cy1,
-                          buf1x, buf1y, buf2x, buf2y, &ox, &oy);
+  int m = dev_clip_polygon(d, qx, qy, 4, &ox, &oy);
   if (m < 3) return;
   double x0, y0, x1, y1;
   bbox(ox, oy, m, &x0, &y0, &x1, &y1);
   sp_open(d, "");
-  fprintf(d->out, "<xdr:spPr>");
+  mb_printf(&d->out, "<xdr:spPr>");
   xfrm(d, x0, y0, x1, y1);
   points_to_pts(d, ox, oy, m, x0 * PT_TO_EMU, y0 * PT_TO_EMU,
                 (x1 - x0) * PT_TO_EMU, (y1 - y0) * PT_TO_EMU, TRUE);
   fill_props(d, col);
-  fprintf(d->out, "<a:ln><a:noFill/></a:ln>");
-  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
+  mb_printf(&d->out, "<a:ln><a:noFill/></a:ln>");
+  mb_printf(&d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
 }
 
 static void Xdr_Raster(unsigned int *raster, int w, int h,
@@ -463,7 +629,7 @@ static void Xdr_Raster(unsigned int *raster, int w, int h,
                        const pGEcontext gc, pDevDesc dd) {
   (void) interpolate; (void) gc;
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
-  if (w <= 0 || h <= 0) return;
+  if (d->capturing || w <= 0 || h <= 0) return;
 
   int rotated = fabs(rot) > 1e-4;
   double left  = fmin(x, x + width);
@@ -505,12 +671,12 @@ static void Xdr_Raster(unsigned int *raster, int w, int h,
         }
         if (!rotated) {
           sp_open(d, "");
-          fprintf(d->out, "<xdr:spPr>");
+          mb_printf(&d->out, "<xdr:spPr>");
           xfrm(d, rx0, ry0, rx1, ry1);
-          fprintf(d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
+          mb_printf(&d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
           fill_props(d, (int) col);
-          fprintf(d->out, "<a:ln><a:noFill/></a:ln>");
-          fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
+          mb_printf(&d->out, "<a:ln><a:noFill/></a:ln>");
+          mb_printf(&d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
         } else {
           double qx[4] = {rx0, rx1, rx1, rx0};
           double qy[4] = {ry0, ry0, ry1, ry1};
@@ -534,32 +700,52 @@ static void Xdr_Mode(int mode, pDevDesc dd) { (void) mode; (void) dd; }
 
 static void Xdr_NewPage(const pGEcontext gc, pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  d->clip_shaped = 0;
   d->page++;
   if (d->page == 2)
     Rf_warning("easeling writes a single drawing; additional pages are drawn on top of the first");
   if (gc->fill != NA_INTEGER && !R_TRANSPARENT(gc->fill)) {
     sp_open(d, "");
-    fprintf(d->out, "<xdr:spPr>");
+    mb_printf(&d->out, "<xdr:spPr>");
     xfrm(d, 0.0, 0.0, dd->right, dd->bottom);
-    fprintf(d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
+    mb_printf(&d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
     fill_props(d, gc->fill);
-    fprintf(d->out, "<a:ln><a:noFill/></a:ln>");
-    fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
+    mb_printf(&d->out, "<a:ln><a:noFill/></a:ln>");
+    mb_printf(&d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
   }
 }
 
 static void Xdr_Close(pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
 
-  fprintf(d->out, "</xdr:grpSp><xdr:clientData/></xdr:absoluteAnchor></xdr:wsDr>");
+  mb_printf(&d->out, "</xdr:grpSp><xdr:clientData/></xdr:absoluteAnchor></xdr:wsDr>");
 
-  if (fclose(d->out) != 0)
-    Rf_warning("easeling: error writing output file");
+  if (d->path != NULL) {
+    FILE *fp = fopen(d->path, "w");
+    if (fp == NULL) {
+      Rf_warning("easeling: cannot open '%s'", d->path);
+    } else {
+      size_t written = fwrite(d->out.data, 1, d->out.len, fp);
+      if (written != d->out.len || fclose(fp) != 0)
+        Rf_warning("easeling: error writing output file");
+    }
+    free(d->path);
+  } else {
+    SEXP str = PROTECT(Rf_ScalarString(
+      Rf_mkCharLenCE(d->out.data, (int) d->out.len, CE_UTF8)));
+    Rf_defineVar(Rf_install("xml"), str, d->result_env);
+    UNPROTECT(1);
+    R_ReleaseObject(d->result_env);
+  }
+  free(d->out.data);
   free(d);
 }
 
 static void Xdr_Clip(double x0, double x1, double y0, double y1, pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  /* a rect clip is a full clip reset; the engine re-issues setClipPath
+   afterwards when a path clip is still meant to apply (cairo protocol) */
+  d->clip_shaped = 0;
   d->clip_x0 = x0; d->clip_x1 = x1;
   d->clip_y0 = y0; d->clip_y1 = y1;
 }
@@ -594,13 +780,30 @@ static const double CHAR_W[126 - 32 + 1] = {
   0.583,0.583,0.333,0.500,0.250,0.583,0.500,0.750,0.500,0.500,0.500,0.35,0.25,0.35,0.55
 };
 
+/* callers guarantee 32 <= c <= 126 (see dev_char_w) */
 static double char_width_frac(unsigned char c) {
-  if (c >= 32 && c <= 126) return CHAR_W[c - 32];
-  return FALLBACK_CHAR_W;
+  return CHAR_W[c - 32];
+}
+
+static void char_vmetrics(int c, double *asc, double *desc);
+
+static double dev_char_w(const xdrDesc *d, int c) {
+  if (c < 32 || c > 126) return FALLBACK_CHAR_W;
+  if (d->have_metrics) return d->cw[c - 32];
+  return char_width_frac((unsigned char) c);
+}
+
+static void dev_char_v(const xdrDesc *d, int c, double *asc, double *desc) {
+  if (d->have_metrics && c >= 32 && c <= 126) {
+    *asc = d->ca[c - 32];
+    *desc = d->cd2[c - 32];
+    return;
+  }
+  char_vmetrics(c, asc, desc);
 }
 
 static double Xdr_StrWidth(const char *str, const pGEcontext gc, pDevDesc dd) {
-  (void) dd;
+  const xdrDesc *d = (const xdrDesc *) dd->deviceSpecific;
   double sz = gc->cex * gc->ps;
   double total = 0.0;
   for (const unsigned char *p = (const unsigned char *) str; *p != '\0'; p++) {
@@ -608,7 +811,7 @@ static double Xdr_StrWidth(const char *str, const pGEcontext gc, pDevDesc dd) {
      one glyph at the fallback width, since we don't have real metrics
      for non-ASCII text. */
     if ((*p & 0xC0) == 0x80) continue;
-    total += (*p < 0x80) ? char_width_frac(*p) : FALLBACK_CHAR_W;
+    total += dev_char_w(d, (int) *p);
   }
   return total * sz;
 }
@@ -639,25 +842,21 @@ static void char_vmetrics(int c, double *asc, double *desc) {
 
 static void Xdr_MetricInfo(int c, const pGEcontext gc, double *ascent,
                            double *descent, double *width, pDevDesc dd) {
-  (void) dd;
   double sz = gc->cex * gc->ps;
+  xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   if (c < 0) c = -c; /* negative c is a Unicode code point */
-  if (c == 0) {      /* whole-font metrics */
-    *ascent  = 0.75 * sz;
-    *descent = 0.25 * sz;
-  } else {
-    double a, d2;
-    char_vmetrics(c, &a, &d2);
-    *ascent  = a * sz;
-    *descent = d2 * sz;
-  }
-  *width = (c >= 32 && c <= 126) ? char_width_frac((unsigned char) c) * sz
-                                 : FALLBACK_CHAR_W * sz;
+  /* c == 0 asks for whole-font metrics and lands on the generous default */
+  double a, d2;
+  dev_char_v(d, c, &a, &d2);
+  *ascent  = a * sz;
+  *descent = d2 * sz;
+  *width   = dev_char_w(d, c) * sz;
 }
 
 static void Xdr_Line(double x1, double y1, double x2, double y2,
                      const pGEcontext gc, pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  if (d->capturing) return;
   double px[2] = {x1, x2};
   double py[2] = {y1, y2};
   emit_clipped_polyline(d, px, py, 2, gc);
@@ -666,6 +865,18 @@ static void Xdr_Line(double x1, double y1, double x2, double y2,
 static void Xdr_Rect(double x0, double y0, double x1, double y1,
                      const pGEcontext gc, pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  if (d->capturing) {
+    double qx[4] = {x0, x1, x1, x0};
+    double qy[4] = {y0, y0, y1, y1};
+    capture_ring(d, qx, qy, 4);
+    return;
+  }
+  if (d->clip_shaped) {
+    double qx[4] = {fmin(x0, x1), fmax(x0, x1), fmax(x0, x1), fmin(x0, x1)};
+    double qy[4] = {fmin(y0, y1), fmin(y0, y1), fmax(y0, y1), fmax(y0, y1)};
+    emit_clipped_ring(d, qx, qy, 4, gc);
+    return;
+  }
   double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
   double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
   double ox0 = fmin(x0, x1), ox1 = fmax(x0, x1);
@@ -679,18 +890,18 @@ static void Xdr_Rect(double x0, double y0, double x1, double y1,
                      gc->lty == LTY_BLANK);
 
   sp_open(d, "");
-  fprintf(d->out, "<xdr:spPr>");
+  mb_printf(&d->out, "<xdr:spPr>");
   xfrm(d, rx0, ry0, rx1, ry1);
-  fprintf(d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
+  mb_printf(&d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
   fill_props_gc(d, gc);
   if (cut && has_border) {
     /* clipping cut the rect: don't stroke the edges the clip introduced;
      draw the surviving pieces of the original outline separately */
-    fprintf(d->out, "<a:ln><a:noFill/></a:ln>");
+    mb_printf(&d->out, "<a:ln><a:noFill/></a:ln>");
   } else {
     line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
   }
-  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
+  mb_printf(&d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
 
   if (cut && has_border) {
     double bx[5] = {ox0, ox1, ox1, ox0, ox0};
@@ -701,18 +912,29 @@ static void Xdr_Rect(double x0, double y0, double x1, double y1,
 
 static void Xdr_Circle(double x, double y, double r, const pGEcontext gc, pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  if (d->capturing) {
+    double px[64], py[64];
+    for (int i = 0; i < 64; i++) {
+      double t = 2.0 * M_PI * (double) i / 64.0;
+      px[i] = x + r * cos(t);
+      py[i] = y + r * sin(t);
+    }
+    capture_ring(d, px, py, 64);
+    return;
+  }
   if (fully_outside_clip(d, x - r, y - r, x + r, y + r)) return;
   double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
   double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
 
-  if (x - r >= cx0 && x + r <= cx1 && y - r >= cy0 && y + r <= cy1) {
+  if (!d->clip_shaped &&
+      x - r >= cx0 && x + r <= cx1 && y - r >= cy0 && y + r <= cy1) {
     sp_open(d, "");
-    fprintf(d->out, "<xdr:spPr>");
+    mb_printf(&d->out, "<xdr:spPr>");
     xfrm(d, x - r, y - r, x + r, y + r);
-    fprintf(d->out, "<a:prstGeom prst=\"ellipse\"><a:avLst/></a:prstGeom>");
+    mb_printf(&d->out, "<a:prstGeom prst=\"ellipse\"><a:avLst/></a:prstGeom>");
     fill_props_gc(d, gc);
     line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
-    fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
+    mb_printf(&d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
     return;
   }
 
@@ -731,37 +953,85 @@ static void Xdr_Circle(double x, double y, double r, const pGEcontext gc, pDevDe
 
 static void Xdr_Polyline(int n, double *x, double *y, const pGEcontext gc, pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  if (d->capturing) return;
   emit_clipped_polyline(d, x, y, n, gc);
 }
 
 static void Xdr_Polygon(int n, double *x, double *y, const pGEcontext gc, pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  if (d->capturing) { capture_ring(d, x, y, n); return; }
   emit_clipped_ring(d, x, y, n, gc);
+}
+
+static double ring_signed_area(const double *x, const double *y, int n) {
+  double a = 0.0;
+  for (int i = 0; i < n; i++) {
+    int j = (i + 1) % n;
+    a += x[i] * y[j] - x[j] * y[i];
+  }
+  return 0.5 * a;
+}
+
+static int point_in_ring(double px, double py, const double *x, const double *y, int n) {
+  int inside = 0;
+  for (int i = 0, j = n - 1; i < n; j = i++) {
+    if (((y[i] > py) != (y[j] > py)) &&
+        (px < (x[j] - x[i]) * (py - y[i]) / (y[j] - y[i]) + x[i]))
+      inside = !inside;
+  }
+  return inside;
 }
 
 static void Xdr_Path(double *x, double *y, int npoly, int *nper,
                      Rboolean winding, const pGEcontext gc, pDevDesc dd) {
-  /* DrawingML custGeom has no evenodd fill rule; all paths use nonzero winding.
-   Both R fill rules produce the same output — acceptable given the format limit. */
-  (void) winding;
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   if (npoly < 1) return;
+  if (d->capturing) {
+    int idx = 0;
+    for (int k = 0; k < npoly; k++) {
+      capture_ring(d, x + idx, y + idx, nper[k]);
+      idx += nper[k];
+    }
+    return;
+  }
 
   int total = 0;
   for (int k = 0; k < npoly; k++) total += nper[k];
   if (total < 2) return;
 
-  double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
-  double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
+  /* Renderers fill custGeom with the nonzero rule and there is no evenodd
+   switch. For R's evenodd we emulate the common nested-ring case by
+   normalising each ring's orientation to its nesting parity (even depth
+   anticlockwise, odd clockwise), which makes nonzero cut the holes.
+   Self-intersecting evenodd exotica beyond ring nesting stay nonzero. */
+  if (!winding && npoly > 1) {
+    int idx_k = 0;
+    for (int k = 0; k < npoly; k++) {
+      int depth = 0, idx_m = 0;
+      for (int m = 0; m < npoly; m++) {
+        if (m != k &&
+            point_in_ring(x[idx_k], y[idx_k], x + idx_m, y + idx_m, nper[m]))
+          depth++;
+        idx_m += nper[m];
+      }
+      double area = ring_signed_area(x + idx_k, y + idx_k, nper[k]);
+      int want_ccw = (depth % 2 == 0);       /* device y is down: ccw = area < 0 */
+      int is_ccw = (area < 0.0);
+      if (want_ccw != is_ccw) {
+        for (int i = 0, j = nper[k] - 1; i < j; i++, j--) {
+          double t;
+          t = x[idx_k + i]; x[idx_k + i] = x[idx_k + j]; x[idx_k + j] = t;
+          t = y[idx_k + i]; y[idx_k + i] = y[idx_k + j]; y[idx_k + j] = t;
+        }
+      }
+      idx_k += nper[k];
+    }
+  }
 
   /* Clip each ring and collect surviving vertices to compute the global bbox. */
   int max_ring = 0;
   for (int k = 0; k < npoly; k++) if (nper[k] > max_ring) max_ring = nper[k];
-  int cap = (max_ring + 4) * 4;
-  double *buf1x = (double *) R_alloc((size_t) cap, sizeof(double));
-  double *buf1y = (double *) R_alloc((size_t) cap, sizeof(double));
-  double *buf2x = (double *) R_alloc((size_t) cap, sizeof(double));
-  double *buf2y = (double *) R_alloc((size_t) cap, sizeof(double));
+  int cap = 2 * (max_ring + 4 + (d->clip_shaped ? d->ring_n : 0)) + 8;
 
   /* clipped ring storage: at most cap vertices per ring, npoly rings */
   double *crx = (double *) R_alloc((size_t)(cap * npoly), sizeof(double));
@@ -772,9 +1042,7 @@ static void Xdr_Path(double *x, double *y, int npoly, int *nper,
   double gx0 = R_PosInf, gy0 = R_PosInf, gx1 = R_NegInf, gy1 = R_NegInf;
   for (int k = 0; k < npoly; k++) {
     double *ox, *oy;
-    int m = clip_polygon_sh(x + idx, y + idx, nper[k],
-                            cx0, cy0, cx1, cy1,
-                            buf1x, buf1y, buf2x, buf2y, &ox, &oy);
+    int m = dev_clip_polygon(d, x + idx, y + idx, nper[k], &ox, &oy);
     crn[k] = m;
     if (m != nper[k]) cut = 1;
     if (m >= 2) {
@@ -804,33 +1072,35 @@ static void Xdr_Path(double *x, double *y, int npoly, int *nper,
   double h_or1 = h_emu <= 0 ? 1.0 : h_emu;
 
   sp_open(d, "");
-  fprintf(d->out, "<xdr:spPr>");
+  mb_printf(&d->out, "<xdr:spPr>");
   xfrm(d, gx0, gy0, gx1, gy1);
-  fprintf(d->out,
+  mb_printf(&d->out,
           "<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/>"
           "<a:rect l=\"0\" t=\"0\" r=\"%.0f\" b=\"%.0f\"/><a:pathLst>",
             w_or1, h_or1);
 
+  /* All rings inside ONE <a:path>: renderers fill each path element
+   independently, so per-ring paths would paint holes solid on top. */
+  mb_printf(&d->out, "<a:path w=\"%.0f\" h=\"%.0f\">", w_or1, h_or1);
   for (int k = 0; k < npoly; k++) {
     int m = crn[k];
     if (m < 2) continue;
-    fprintf(d->out, "<a:path w=\"%.0f\" h=\"%.0f\">", w_or1, h_or1);
     for (int i = 0; i < m; i++) {
       double px = crx[k * cap + i] * PT_TO_EMU - x_min;
       double py = cry[k * cap + i] * PT_TO_EMU - y_min;
-      fprintf(d->out, "<a:%s><a:pt x=\"%.0f\" y=\"%.0f\"/></a:%s>",
+      mb_printf(&d->out, "<a:%s><a:pt x=\"%.0f\" y=\"%.0f\"/></a:%s>",
               i == 0 ? "moveTo" : "lnTo", px, py,
               i == 0 ? "moveTo" : "lnTo");
     }
-    fprintf(d->out, "<a:close/></a:path>");
+    mb_printf(&d->out, "<a:close/>");
   }
-  fprintf(d->out, "</a:pathLst></a:custGeom>");
+  mb_printf(&d->out, "</a:path></a:pathLst></a:custGeom>");
   fill_props_gc(d, gc);
   if (has_border && !cut)
     line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
   else
-    fprintf(d->out, "<a:ln><a:noFill/></a:ln>");
-  fprintf(d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
+    mb_printf(&d->out, "<a:ln><a:noFill/></a:ln>");
+  mb_printf(&d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
 
   if (has_border && cut) {
     double *rx = (double *) R_alloc((size_t) max_ring + 1, sizeof(double));
@@ -849,6 +1119,7 @@ static void Xdr_Path(double *x, double *y, int npoly, int *nper,
 static void Xdr_TextImpl(double x, double y, const char *str, double rot,
                          double hadj, const pGEcontext gc, pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  if (d->capturing) return;
   if (str == NULL || str[0] == '\0') return;
   size_t buflen = strlen(str) * 6 + 1;
   char *buf = R_alloc(buflen, 1);
@@ -898,18 +1169,18 @@ static void Xdr_TextImpl(double x, double y, const char *str, double rot,
   if (fully_outside_clip(d, bx0, by0, bx1, by1)) return;
 
   sp_open(d, "");
-  fprintf(d->out, "<xdr:spPr>");
+  mb_printf(&d->out, "<xdr:spPr>");
 
   xfrm(d, bx0, by0, bx1, by1);
 
-  fprintf(d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/>"
+  mb_printf(&d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/>"
             "<a:ln><a:noFill/></a:ln></xdr:spPr>");
 
   if (fabs(rot) > 1e-4) {
     int ooxml_rot = (int) (-rot * 60000.0);
-    fprintf(d->out, "<xdr:txBody><a:bodyPr rot=\"%d\" vert=\"horz\" anchor=\"ctr\" wrap=\"none\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/>", ooxml_rot);
+    mb_printf(&d->out, "<xdr:txBody><a:bodyPr rot=\"%d\" vert=\"horz\" anchor=\"ctr\" wrap=\"none\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/>", ooxml_rot);
   } else {
-    fprintf(d->out, "<xdr:txBody><a:bodyPr anchor=\"ctr\" wrap=\"none\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/>");
+    mb_printf(&d->out, "<xdr:txBody><a:bodyPr anchor=\"ctr\" wrap=\"none\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/>");
   }
 
   const char *b_attr = (gc->fontface == 2 || gc->fontface == 4) ? " b=\"1\"" : "";
@@ -925,11 +1196,11 @@ static void Xdr_TextImpl(double x, double y, const char *str, double rot,
   int sz = (int) lround(fs * 100.0);
   if (sz < 100) sz = 100;
 
-  fprintf(d->out,
+  mb_printf(&d->out,
           "<a:p><a:pPr algn=\"%s\"/><a:r><a:rPr sz=\"%d\"%s%s%s%s><a:solidFill>",
           algn, sz, b_attr, i_attr, u_attr, strike_attr);
-  srgb_clr(d->out, gc->col);
-  fprintf(d->out,
+  srgb_clr(&d->out, gc->col);
+  mb_printf(&d->out,
           "</a:solidFill><a:latin typeface=\"%s\"/><a:cs typeface=\"%s\"/></a:rPr>"
           "<a:t>%s</a:t></a:r></a:p></xdr:txBody></xdr:sp>\n",
           fbuf, fbuf, buf);
@@ -940,6 +1211,7 @@ static void Xdr_Text(double x, double y, const char *str, double rot,
   Xdr_TextImpl(x, y, str, rot, hadj, gc, dd);
 }
 
+#if R_GE_version >= 13
 static SEXP Xdr_SetPattern(SEXP pattern, pDevDesc dd) {
   (void) dd;
   return pattern;
@@ -950,7 +1222,45 @@ static void Xdr_ReleasePattern(SEXP ref, pDevDesc dd) {
 }
 
 static SEXP Xdr_SetClipPath(SEXP path, SEXP ref, pDevDesc dd) {
-  (void) path; (void) ref; (void) dd;
+  (void) ref;
+  xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  d->clip_shaped = 0;
+  if (path == R_NilValue || !Rf_isFunction(path)) return R_NilValue;
+  /* Replay the clip grob through our own draw callbacks in capture mode
+   to obtain its outline (the cairo devices use the same mechanism). */
+  d->capturing = 1;
+  d->ring_n = 0;
+  d->cap_fail = 0;
+  d->cap_any = 0;
+  SEXP call = PROTECT(Rf_lang1(path));
+  int err = 0;
+  R_tryEval(call, R_GlobalEnv, &err);
+  UNPROTECT(1);
+  d->capturing = 0;
+  if (err || !d->cap_any) return R_NilValue;
+
+  int ok = (!d->cap_fail && d->ring_n >= 3 &&
+            ring_is_convex(d->ring_x, d->ring_y, d->ring_n));
+  if (!ok) {
+    /* Non-convex or multi-ring region: clip to its bounding box. */
+    Rf_warning("easeling: non-convex or multi-ring clip path; clipping to its bounding box");
+    d->ring_x[0] = d->cap_bx0; d->ring_y[0] = d->cap_by0;
+    d->ring_x[1] = d->cap_bx1; d->ring_y[1] = d->cap_by0;
+    d->ring_x[2] = d->cap_bx1; d->ring_y[2] = d->cap_by1;
+    d->ring_x[3] = d->cap_bx0; d->ring_y[3] = d->cap_by1;
+    d->ring_n = 4;
+  }
+  /* normalise orientation so the interior is where cross(edge, q-p) <= 0 */
+  if (ring_signed_area(d->ring_x, d->ring_y, d->ring_n) > 0.0) {
+    for (int i = 0, j = d->ring_n - 1; i < j; i++, j--) {
+      double t;
+      t = d->ring_x[i]; d->ring_x[i] = d->ring_x[j]; d->ring_x[j] = t;
+      t = d->ring_y[i]; d->ring_y[i] = d->ring_y[j]; d->ring_y[j] = t;
+    }
+  }
+  bbox(d->ring_x, d->ring_y, d->ring_n,
+       &d->cap_bx0, &d->cap_by0, &d->cap_bx1, &d->cap_by1);
+  d->clip_shaped = 1;
   return R_NilValue;
 }
 
@@ -966,11 +1276,14 @@ static SEXP Xdr_SetMask(SEXP path, SEXP ref, pDevDesc dd) {
 static void Xdr_ReleaseMask(SEXP ref, pDevDesc dd) {
   (void) ref; (void) dd;
 }
+#endif
 
 SEXP easeling_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
                SEXP fontname_, SEXP underline_, SEXP strikeout_,
-               SEXP text_voff_) {
-  const char *path = CHAR(STRING_ELT(path_, 0));
+               SEXP text_voff_, SEXP result_env_, SEXP metrics_) {
+  const char *path = (path_ == R_NilValue) ? NULL : CHAR(STRING_ELT(path_, 0));
+  if (path == NULL && TYPEOF(result_env_) != ENVSXP)
+    Rf_error("internal: memory output needs an environment");
   double width  = REAL(width_)[0];
   double height = REAL(height_)[0];
   double ps     = REAL(pointsize_)[0];
@@ -987,14 +1300,36 @@ SEXP easeling_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
   xdrDesc *xd = (xdrDesc *) calloc(1, sizeof(xdrDesc));
   if (xd == NULL) { free(dd); Rf_error("could not allocate device"); }
 
-  xd->out = fopen(path, "w");
-  if (xd->out == NULL) { free(xd); free(dd); Rf_error("cannot open '%s'", path); }
+  if (path != NULL) {
+    /* fail early on an unwritable path instead of at close */
+    FILE *fp = fopen(path, "w");
+    if (fp == NULL) { free(xd); free(dd); Rf_error("cannot open '%s'", path); }
+    fclose(fp);
+    xd->path = strdup(path);
+    if (xd->path == NULL) {              /* # nocov start */
+      free(xd); free(dd);
+      Rf_error("could not allocate device");
+    }                                    /* # nocov end */
+  } else {
+    xd->result_env = result_env_;
+    R_PreserveObject(xd->result_env);
+  }
+  mb_reserve(&xd->out, 0);
   xd->shape_id = 2; /* id 1 is the group */
   xd->page = 0;
   xd->clip_x0 = 0; xd->clip_y0 = 0;
   xd->clip_x1 = width * 72.0; xd->clip_y1 = height * 72.0;
   strncpy(xd->fontname, fontname, sizeof(xd->fontname) - 1);
   xd->text_voff = REAL(text_voff_)[0];
+  if (metrics_ != R_NilValue) {
+    if (TYPEOF(metrics_) != REALSXP || Rf_xlength(metrics_) != 285)
+      Rf_error("internal: metrics must be a numeric vector of length 285");
+    const double *m = REAL(metrics_);
+    memcpy(xd->cw,  m,       95 * sizeof(double));
+    memcpy(xd->ca,  m +  95, 95 * sizeof(double));
+    memcpy(xd->cd2, m + 190, 95 * sizeof(double));
+    xd->have_metrics = 1;
+  }
   xd->fontname[sizeof(xd->fontname) - 1] = '\0';
   xd->underline = underline;
   xd->strikeout = strikeout;
@@ -1004,7 +1339,7 @@ SEXP easeling_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
   double emu_w = dev_w * PT_TO_EMU;
   double emu_h = dev_h * PT_TO_EMU;
 
-  fprintf(xd->out,
+  mb_printf(&xd->out,
           "<xdr:wsDr xmlns:xdr=\"http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing\" "
             "xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\">"
             "<xdr:absoluteAnchor>"
@@ -1085,15 +1420,23 @@ SEXP easeling_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
   dd->haveCapture = 1; /* no - dd->cap is NULL; R checks before calling, so safe */
   dd->haveLocator = 1; /* no - dd->locator is NULL; R checks before calling, so safe */
 
+#if R_GE_version >= 13
+  /* deviceVersion and deviceClip only exist from R 4.1 (GE 13); older
+   engines assume version-12 behaviour and engine-side clipping checks */
   dd->deviceVersion = R_GE_definitions;
+#endif
+#if R_GE_version >= 13
   dd->deviceClip = FALSE;
+#endif
 
+#if R_GE_version >= 13
   dd->setPattern = Xdr_SetPattern;
   dd->releasePattern = Xdr_ReleasePattern;
   dd->setClipPath = Xdr_SetClipPath;
   dd->releaseClipPath = Xdr_ReleaseClipPath;
   dd->setMask = Xdr_SetMask;
   dd->releaseMask = Xdr_ReleaseMask;
+#endif
 
   pGEDevDesc gdd = GEcreateDevDesc(dd);
   GEaddDevice2(gdd, "easeling");
@@ -1103,7 +1446,7 @@ SEXP easeling_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
 }
 
 static const R_CallMethodDef CallEntries[] = {
-  {"easeling_", (DL_FUNC) &easeling_, 8},
+  {"easeling_", (DL_FUNC) &easeling_, 10},
   {NULL, NULL, 0}
 };
 

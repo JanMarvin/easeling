@@ -15,11 +15,13 @@ easel_dev(
   dims = NULL,
   wb = NULL,
   sheet = 1,
-  text_voff = 0.35
+  text_voff = 0.35,
+  metrics = NULL
 )
 }
 \arguments{
-\item{file}{Path to the output XML file. Defaults to a temp file.}
+\item{file}{Path of the XML file to write. Defaults to a temp file.
+For a plain string instead of a file, see [easel_xml()].}
 
 \item{width, height}{Device size in inches.}
 
@@ -56,6 +58,17 @@ Calibri; LibreOffice's optimum is around 0.24, so text there sits
 decrease to shift it down, if your spreadsheet application's line
 layout places it visibly off; see
 `system.file("examples", "calibrate_text.R", package = "easeling")`.}
+
+\item{metrics}{Font metrics used for text layout (string widths,
+vertical centring, margins). `NULL` (default): use real metrics for
+`fontname` via the `systemfonts` package when it is installed,
+otherwise the built-in Calibri-like table. `FALSE`: always use the
+built-in table. Or a list with numeric components `widths`,
+`ascents`, `descents`, each of length 95 giving em fractions for the
+ASCII characters 32..126. Metrics only affect what R computes -
+rendering is always done by the spreadsheet application with the real
+font - but better metrics mean legend boxes, margins, and centring
+are sized for the text that will actually appear.}
 }
 \value{
 The output file path, invisibly.
