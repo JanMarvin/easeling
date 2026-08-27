@@ -765,14 +765,17 @@ test_that("easel_size reads custom widths, heights, and defaults from a wb", {
   wb$set_col_widths(cols = 2, widths = 25)
   wb$set_row_heights(rows = 4:6, heights = 30)
   # openxlsx2 pads stored width (25 -> 25.711) and writes defaultRowHeight=16
+  # derive expectations from the same workbook instead of hardcoding the
+  # default geometry: openxlsx2 versions differ in the sheetFormatPr they
+  # write (baseColWidth="8" vs defaultColWidth="8.88671875")
   stored <- as.numeric(sub('.*width="([0-9.]+)".*', "\\1",
                            wb$worksheets[[1]]$cols_attr[1]))
   b_px <- trunc(stored * 7 + 0.5) + 5
+  def_col_in <- easel_size("C1", wb)[["width"]]   # an untouched default col
+  def_row_in <- easel_size("A1", wb)[["height"]]  # an untouched default row
   sz <- easel_size("B2:F12", wb)
-  expect_equal(unname(sz["width"]), (b_px + 4 * 64) / 96)
-  def_ht <- as.numeric(sub('.*defaultRowHeight="([0-9.]+)".*', "\\1",
-                           wb$worksheets[[1]]$sheetFormatPr))
-  expect_equal(unname(sz["height"]), (8 * round(def_ht * 4 / 3) + 3 * 40) / 96)
+  expect_equal(unname(sz["width"]), b_px / 96 + 4 * def_col_in)
+  expect_equal(unname(sz["height"]), 8 * def_row_in + 3 * round(30 * 4 / 3) / 96)
 })
 
 test_that("easel_dev(dims=) sizes the device from the region", {
@@ -817,7 +820,7 @@ test_that("easel_size handles hidden and width-less cols, out-of-range and hidde
   ws$sheet_data$row_attr <- rbind(ra, hid)
   sz <- easel_size("A1:B2", wb)
   # col A hidden -> 0 px; the width-less <col> entry leaves B at the default
-  expect_equal(unname(sz["width"]), 64 / 96)
+  expect_equal(unname(sz["width"]), easel_size("C1", wb)[["width"]])
   # row 2 hidden -> only row 1 contributes
   expect_equal(unname(sz["height"]), easel_size("A1", wb)[["height"]])
 })
@@ -1091,4 +1094,98 @@ test_that("multi-subpath pathGrob clips via the path callback (bbox fallback)", 
   tol <- 1e-6
   expect_lte(max(bb$x1), 3 * 0.9 + tol)   # combined bbox of both rings
   expect_gte(min(bb$y0), 3 * 0.2 - tol)
+})
+
+# Hard-edged masks as clips (R >= 4.2) ----------------------------------------
+
+test_that("white luminance and opaque alpha masks clip; pop restores", {
+  skip_if_not(getRversion() >= "4.2.0")
+  f <- easel_dev(width = 3, height = 3, metrics = FALSE)
+  grid::grid.newpage()
+  grid::pushViewport(grid::viewport(mask = grid::as.mask(
+    grid::circleGrob(r = .3, gp = grid::gpar(fill = "white", col = NA)),
+    type = "luminance")))
+  grid::grid.rect(gp = grid::gpar(fill = "red", col = NA))
+  grid::popViewport()
+  grid::grid.rect(x = .5, y = .05, width = .2, height = .06,
+                  gp = grid::gpar(fill = "blue", col = NA))
+  dev.off()
+  txt <- read_xml_text(f)
+  expect_equal(count_matches(f, "<a:custGeom>"), 1)
+  expect_equal(count_matches(f, 'prst="rect"'), 1)
+
+  f <- easel_dev(width = 3, height = 3, metrics = FALSE)
+  grid::grid.newpage()
+  grid::pushViewport(grid::viewport(mask = grid::as.mask(
+    grid::circleGrob(r = .3, gp = grid::gpar(fill = "black", col = NA)),
+    type = "alpha")))
+  grid::grid.rect(gp = grid::gpar(fill = "red", col = NA))
+  grid::popViewport()
+  dev.off()
+  expect_equal(count_matches(f, "<a:custGeom>"), 1)
+})
+
+test_that("inverse and soft masks warn and degrade to unmasked", {
+  skip_if_not(getRversion() >= "4.2.0")
+  f <- easel_dev(width = 3, height = 3, metrics = FALSE)
+  grid::grid.newpage()
+  expect_warning({
+    grid::pushViewport(grid::viewport(mask = grid::as.mask(
+      grid::circleGrob(r = .3, gp = grid::gpar(fill = "black", col = NA)),
+      type = "luminance")))
+    grid::grid.rect(gp = grid::gpar(fill = "red", col = NA))
+    grid::popViewport()
+  }, "inverse")
+  dev.off()
+  expect_equal(count_matches(f, 'prst="rect"'), 1)   # drawn unmasked
+
+  f <- easel_dev(width = 3, height = 3, metrics = FALSE)
+  grid::grid.newpage()
+  expect_warning({
+    grid::pushViewport(grid::viewport(mask = grid::as.mask(
+      grid::circleGrob(r = .3, gp = grid::gpar(fill = adjustcolor("white", 0.5),
+                                               col = NA)))))
+    grid::grid.rect(gp = grid::gpar(fill = "red", col = NA))
+    grid::popViewport()
+  }, "soft")
+  dev.off()
+  expect_equal(count_matches(f, 'prst="rect"'), 1)
+})
+
+test_that("mask and clip path compose to their intersection", {
+  skip_if_not(getRversion() >= "4.2.0")
+  f <- easel_dev(width = 3, height = 3, metrics = FALSE)
+  grid::grid.newpage()
+  grid::pushViewport(grid::viewport(clip = grid::rectGrob(
+    x = .25, width = .5, height = 1)))                       # left half-ish
+  grid::pushViewport(grid::viewport(mask = grid::as.mask(
+    grid::rectGrob(y = .25, width = 1, height = .5,
+                   gp = grid::gpar(fill = "white", col = NA)),
+    type = "luminance")))                                    # bottom half-ish
+  grid::grid.rect(gp = grid::gpar(fill = "red", col = NA))
+  # lines: one crossing the mask edge (ring-clipped), one fully above the
+  # masked region (rejected by the mask bbox pre-filter)
+  grid::grid.segments(0, .4, 1, .4, gp = grid::gpar(col = "black"))
+  grid::grid.segments(0, .9, 1, .9, gp = grid::gpar(col = "black"))
+  # circle fully above the masked region: rejected by the mask bbox pre-filter
+  grid::grid.circle(x = .25, y = .9, r = .05, gp = grid::gpar(fill = "green"))
+  grid::popViewport(2)
+  dev.off()
+  bb <- data_shape_bboxes(f, 3, 3)
+  tol <- 1e-6
+  expect_lte(max(bb$x1), 1.5 + tol)   # clip: x <= 0.5 npc
+  expect_gte(min(bb$y0), 1.5 - tol)   # mask: bottom half (device y down)
+})
+
+
+test_that("easel_size parses both sheetFormatPr shapes openxlsx2 has written", {
+  skip_if_not_installed("openxlsx2")
+  wb <- openxlsx2::wb_workbook()$add_worksheet()
+  ws <- wb$worksheets[[1]]
+  ws$sheetFormatPr <- '<sheetFormatPr defaultColWidth="8.88671875" defaultRowHeight="15"/>'
+  expect_equal(unname(easel_size("A1", wb)),
+               c(trunc(8.88671875 * 7 + 0.5) + 5, round(15 * 4 / 3)) / 96)  # 67 x 20 px
+  ws$sheetFormatPr <- '<sheetFormatPr baseColWidth="8" defaultRowHeight="16"/>'
+  expect_equal(unname(easel_size("A1", wb)),
+               c(trunc(8.43 * 7 + 0.5) + 5, round(16 * 4 / 3)) / 96)        # 64 x 21 px
 })

@@ -65,6 +65,14 @@ typedef struct {
   double ring_x[CLIP_RING_MAX], ring_y[CLIP_RING_MAX];
   double cap_bx0, cap_by0, cap_bx1, cap_by1;   /* bbox of ALL captured ink */
   int cap_any;
+  /* hard-edged masks reduced to a second clip ring; soft or inverse
+   masks cannot be represented and are ignored with a warning */
+  int cap_kind;              /* 0 = clip path, 1 = mask */
+  int cap_luminance;         /* mask capture: luminance semantics */
+  int mask_soft, mask_hidden_ink;
+  int mask_shaped, mask_n;
+  double mask_x[CLIP_RING_MAX], mask_y[CLIP_RING_MAX];
+  double mask_bx0, mask_by0, mask_bx1, mask_by1;
   double cw[95], ca[95], cd2[95];  /* optional per-char metrics, em */
   int have_metrics;
   double text_voff;
@@ -298,6 +306,9 @@ static Rboolean fully_outside_clip(xdrDesc *d, double x0, double y0, double x1, 
   if (d->clip_shaped &&
       (bx1 < d->cap_bx0 || bx0 > d->cap_bx1 ||
        by1 < d->cap_by0 || by0 > d->cap_by1)) return TRUE;
+  if (d->mask_shaped &&
+      (bx1 < d->mask_bx0 || bx0 > d->mask_bx1 ||
+       by1 < d->mask_by0 || by0 > d->mask_by1)) return TRUE;
   return FALSE;
 }
 
@@ -389,6 +400,30 @@ static int ring_is_convex(const double *x, const double *y, int n) {
   return 1;
 }
 
+static double fill_luminance(int col) {
+  return (0.299 * R_RED(col) + 0.587 * R_GREEN(col) + 0.114 * R_BLUE(col)) / 255.0;
+}
+
+/* During mask capture, decide whether this shape marks a visible region.
+ Semi-transparent or gradient fills mean a soft mask; under luminance
+ semantics dark ink means hide, which no clip can express. */
+static int capture_visible(xdrDesc *d, const pGEcontext gc) {
+  if (d->cap_kind == 0) return 1;                 /* clip path: geometry only */
+#if R_GE_version >= 13
+  if (gc->patternFill != R_NilValue) { d->mask_soft = 1; return 0; }
+#endif
+  int fill = gc->fill;
+  if (fill == NA_INTEGER || R_TRANSPARENT(fill)) return 0;
+  int a = R_ALPHA(fill);
+  if (a > 5 && a < 250) { d->mask_soft = 1; return 0; }
+  if (a <= 5) return 0;
+  if (d->cap_luminance && fill_luminance(fill) < 0.5) {
+    d->mask_hidden_ink = 1;
+    return 0;
+  }
+  return 1;
+}
+
 static void capture_ring(xdrDesc *d, const double *x, const double *y, int n) {
   for (int i = 0; i < n; i++) {
     if (!d->cap_any || x[i] < d->cap_bx0) d->cap_bx0 = x[i];
@@ -446,14 +481,17 @@ static int clip_polygon_ring(const double *x, const double *y, int n,
 }
 
 /* Cyrus-Beck: clip a segment to the convex ring; FALSE if fully outside. */
-static Rboolean clip_line_ring(const xdrDesc *d, double *x1, double *y1,
+static Rboolean clip_line_ring(const xdrDesc *d, const double *rx,
+                               const double *ry, int rn,
+                               double *x1, double *y1,
                                double *x2, double *y2) {
+  (void) d;
   double t0 = 0.0, t1 = 1.0;
   double sx = *x1, sy = *y1, dxs = *x2 - *x1, dys = *y2 - *y1;
-  for (int e = 0; e < d->ring_n; e++) {
-    int f = (e + 1) % d->ring_n;
-    double px = d->ring_x[e], py = d->ring_y[e];
-    double dx = d->ring_x[f] - px, dy = d->ring_y[f] - py;
+  for (int e = 0; e < rn; e++) {
+    int f = (e + 1) % rn;
+    double px = rx[e], py = ry[e];
+    double dx = rx[f] - px, dy = ry[f] - py;
     double fa = dx * (sy - py) - dy * (sx - px);
     double fb = dx * (sy + dys - py) - dy * (sx + dxs - px);
     if (fa > 0.0 && fb > 0.0) return FALSE;
@@ -475,17 +513,23 @@ static Rboolean dev_clip_line(const xdrDesc *d, double *x1, double *y1,
   double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
   double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
   if (!clip_line_lb(cx0, cy0, cx1, cy1, x1, y1, x2, y2)) return FALSE;
-  if (d->clip_shaped) return clip_line_ring(d, x1, y1, x2, y2);
+  if (d->clip_shaped &&
+      !clip_line_ring(d, d->ring_x, d->ring_y, d->ring_n, x1, y1, x2, y2))
+    return FALSE;
+  if (d->mask_shaped &&
+      !clip_line_ring(d, d->mask_x, d->mask_y, d->mask_n, x1, y1, x2, y2))
+    return FALSE;
   return TRUE;
 }
 
 /* Clips against the rect and (if active) the ring; buffers via R_alloc.
- Returns vertex count; *ox/*oy point into the result. */
+ Returns vertex count; *ox and *oy point into the result. */
 static int dev_clip_polygon(const xdrDesc *d, const double *x, const double *y,
                             int n, double **ox, double **oy) {
   double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
   double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
-  int cap = 2 * (n + 4 + (d->clip_shaped ? d->ring_n : 0)) + 8;
+  int cap = 2 * (n + 4 + (d->clip_shaped ? d->ring_n : 0)
+                       + (d->mask_shaped ? d->mask_n : 0)) + 8;
   double *b1x = (double *) R_alloc((size_t) cap, sizeof(double));
   double *b1y = (double *) R_alloc((size_t) cap, sizeof(double));
   double *b2x = (double *) R_alloc((size_t) cap, sizeof(double));
@@ -498,6 +542,14 @@ static int dev_clip_polygon(const xdrDesc *d, const double *x, const double *y,
     double *b4y = (double *) R_alloc((size_t) cap, sizeof(double));
     m = clip_polygon_ring(*ox, *oy, m, d->ring_x, d->ring_y, d->ring_n,
                           b3x, b3y, b4x, b4y, ox, oy);
+  }
+  if (m > 0 && d->mask_shaped) {
+    double *b5x = (double *) R_alloc((size_t) cap, sizeof(double));
+    double *b5y = (double *) R_alloc((size_t) cap, sizeof(double));
+    double *b6x = (double *) R_alloc((size_t) cap, sizeof(double));
+    double *b6y = (double *) R_alloc((size_t) cap, sizeof(double));
+    m = clip_polygon_ring(*ox, *oy, m, d->mask_x, d->mask_y, d->mask_n,
+                          b5x, b5y, b6x, b6y, ox, oy);
   }
   return m;
 }
@@ -701,6 +753,7 @@ static void Xdr_Mode(int mode, pDevDesc dd) { (void) mode; (void) dd; }
 static void Xdr_NewPage(const pGEcontext gc, pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   d->clip_shaped = 0;
+  d->mask_shaped = 0;
   d->page++;
   if (d->page == 2)
     Rf_warning("easeling writes a single drawing; additional pages are drawn on top of the first");
@@ -866,12 +919,14 @@ static void Xdr_Rect(double x0, double y0, double x1, double y1,
                      const pGEcontext gc, pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   if (d->capturing) {
-    double qx[4] = {x0, x1, x1, x0};
-    double qy[4] = {y0, y0, y1, y1};
-    capture_ring(d, qx, qy, 4);
+    if (capture_visible(d, gc)) {
+      double qx[4] = {x0, x1, x1, x0};
+      double qy[4] = {y0, y0, y1, y1};
+      capture_ring(d, qx, qy, 4);
+    }
     return;
   }
-  if (d->clip_shaped) {
+  if (d->clip_shaped || d->mask_shaped) {
     double qx[4] = {fmin(x0, x1), fmax(x0, x1), fmax(x0, x1), fmin(x0, x1)};
     double qy[4] = {fmin(y0, y1), fmin(y0, y1), fmax(y0, y1), fmax(y0, y1)};
     emit_clipped_ring(d, qx, qy, 4, gc);
@@ -913,20 +968,22 @@ static void Xdr_Rect(double x0, double y0, double x1, double y1,
 static void Xdr_Circle(double x, double y, double r, const pGEcontext gc, pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   if (d->capturing) {
-    double px[64], py[64];
-    for (int i = 0; i < 64; i++) {
-      double t = 2.0 * M_PI * (double) i / 64.0;
-      px[i] = x + r * cos(t);
-      py[i] = y + r * sin(t);
+    if (capture_visible(d, gc)) {
+      double px[64], py[64];
+      for (int i = 0; i < 64; i++) {
+        double t = 2.0 * M_PI * (double) i / 64.0;
+        px[i] = x + r * cos(t);
+        py[i] = y + r * sin(t);
+      }
+      capture_ring(d, px, py, 64);
     }
-    capture_ring(d, px, py, 64);
     return;
   }
   if (fully_outside_clip(d, x - r, y - r, x + r, y + r)) return;
   double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
   double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
 
-  if (!d->clip_shaped &&
+  if (!d->clip_shaped && !d->mask_shaped &&
       x - r >= cx0 && x + r <= cx1 && y - r >= cy0 && y + r <= cy1) {
     sp_open(d, "");
     mb_printf(&d->out, "<xdr:spPr>");
@@ -959,7 +1016,10 @@ static void Xdr_Polyline(int n, double *x, double *y, const pGEcontext gc, pDevD
 
 static void Xdr_Polygon(int n, double *x, double *y, const pGEcontext gc, pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
-  if (d->capturing) { capture_ring(d, x, y, n); return; }
+  if (d->capturing) {
+    if (capture_visible(d, gc)) capture_ring(d, x, y, n);
+    return;
+  }
   emit_clipped_ring(d, x, y, n, gc);
 }
 
@@ -987,10 +1047,12 @@ static void Xdr_Path(double *x, double *y, int npoly, int *nper,
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   if (npoly < 1) return;
   if (d->capturing) {
-    int idx = 0;
-    for (int k = 0; k < npoly; k++) {
-      capture_ring(d, x + idx, y + idx, nper[k]);
-      idx += nper[k];
+    if (capture_visible(d, gc)) {
+      int idx = 0;
+      for (int k = 0; k < npoly; k++) {
+        capture_ring(d, x + idx, y + idx, nper[k]);
+        idx += nper[k];
+      }
     }
     return;
   }
@@ -1221,36 +1283,37 @@ static void Xdr_ReleasePattern(SEXP ref, pDevDesc dd) {
   (void) ref; (void) dd;
 }
 
-static SEXP Xdr_SetClipPath(SEXP path, SEXP ref, pDevDesc dd) {
-  (void) ref;
-  xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
-  d->clip_shaped = 0;
-  if (path == R_NilValue || !Rf_isFunction(path)) return R_NilValue;
-  /* Replay the clip grob through our own draw callbacks in capture mode
-   to obtain its outline (the cairo devices use the same mechanism). */
+/* Run the capture (replaying `fn` through the draw callbacks) and, on
+ success, leave a normalised convex ring in ring_x/ring_y with its bbox in
+ cap_b*. Returns 1 on success, 0 when nothing usable was captured. */
+static int capture_region(xdrDesc *d, SEXP fn, int kind, int luminance) {
   d->capturing = 1;
+  d->cap_kind = kind;
+  d->cap_luminance = luminance;
   d->ring_n = 0;
   d->cap_fail = 0;
   d->cap_any = 0;
-  SEXP call = PROTECT(Rf_lang1(path));
+  d->mask_soft = 0;
+  d->mask_hidden_ink = 0;
+  SEXP call = PROTECT(Rf_lang1(fn));
   int err = 0;
   R_tryEval(call, R_GlobalEnv, &err);
   UNPROTECT(1);
   d->capturing = 0;
-  if (err || !d->cap_any) return R_NilValue;
+  if (err || !d->cap_any) return 0;
 
   int ok = (!d->cap_fail && d->ring_n >= 3 &&
             ring_is_convex(d->ring_x, d->ring_y, d->ring_n));
   if (!ok) {
-    /* Non-convex or multi-ring region: clip to its bounding box. */
-    Rf_warning("easeling: non-convex or multi-ring clip path; clipping to its bounding box");
+    Rf_warning(kind == 0
+      ? "easeling: non-convex or multi-ring clip path; clipping to its bounding box"
+      : "easeling: non-convex or multi-ring mask; masking to its bounding box");
     d->ring_x[0] = d->cap_bx0; d->ring_y[0] = d->cap_by0;
     d->ring_x[1] = d->cap_bx1; d->ring_y[1] = d->cap_by0;
     d->ring_x[2] = d->cap_bx1; d->ring_y[2] = d->cap_by1;
     d->ring_x[3] = d->cap_bx0; d->ring_y[3] = d->cap_by1;
     d->ring_n = 4;
   }
-  /* normalise orientation so the interior is where cross(edge, q-p) <= 0 */
   if (ring_signed_area(d->ring_x, d->ring_y, d->ring_n) > 0.0) {
     for (int i = 0, j = d->ring_n - 1; i < j; i++, j--) {
       double t;
@@ -1260,7 +1323,17 @@ static SEXP Xdr_SetClipPath(SEXP path, SEXP ref, pDevDesc dd) {
   }
   bbox(d->ring_x, d->ring_y, d->ring_n,
        &d->cap_bx0, &d->cap_by0, &d->cap_bx1, &d->cap_by1);
-  d->clip_shaped = 1;
+  return 1;
+}
+
+static SEXP Xdr_SetClipPath(SEXP path, SEXP ref, pDevDesc dd) {
+  (void) ref;
+  xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  d->clip_shaped = 0;
+  if (path == R_NilValue || !Rf_isFunction(path)) return R_NilValue;
+  /* Replay the clip grob through our own draw callbacks in capture mode
+   to obtain its outline (the cairo devices use the same mechanism). */
+  if (capture_region(d, path, 0, 0)) d->clip_shaped = 1;
   return R_NilValue;
 }
 
@@ -1269,7 +1342,41 @@ static void Xdr_ReleaseClipPath(SEXP ref, pDevDesc dd) {
 }
 
 static SEXP Xdr_SetMask(SEXP path, SEXP ref, pDevDesc dd) {
-  (void) path; (void) ref; (void) dd;
+  (void) ref;
+  xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  d->mask_shaped = 0;
+  if (path == R_NilValue || !Rf_isFunction(path)) return R_NilValue;
+  int luminance = 0;
+#ifdef R_GE_luminanceMask
+  luminance = (R_GE_maskType(path) == R_GE_luminanceMask);
+#endif
+  /* preserve any active clip ring: capture reuses the ring buffers */
+  double sx[CLIP_RING_MAX], sy[CLIP_RING_MAX];
+  double sb0 = d->cap_bx0, sb1 = d->cap_by0, sb2 = d->cap_bx1, sb3 = d->cap_by1;
+  int sn = d->clip_shaped ? d->ring_n : 0;
+  for (int i = 0; i < sn; i++) { sx[i] = d->ring_x[i]; sy[i] = d->ring_y[i]; }
+
+  int got = capture_region(d, path, 1, luminance);
+  if (got) {
+    d->mask_n = d->ring_n;
+    for (int i = 0; i < d->ring_n; i++) {
+      d->mask_x[i] = d->ring_x[i];
+      d->mask_y[i] = d->ring_y[i];
+    }
+    d->mask_bx0 = d->cap_bx0; d->mask_by0 = d->cap_by0;
+    d->mask_bx1 = d->cap_bx1; d->mask_by1 = d->cap_by1;
+    d->mask_shaped = 1;
+  } else if (d->mask_soft) {
+    Rf_warning("easeling: soft (semi-transparent or gradient) masks cannot be represented; mask ignored");
+  } else if (d->mask_hidden_ink) {
+    Rf_warning("easeling: inverse (hide-region) luminance masks cannot be represented; mask ignored");
+  }
+
+  if (sn) {
+    for (int i = 0; i < sn; i++) { d->ring_x[i] = sx[i]; d->ring_y[i] = sy[i]; }
+    d->ring_n = sn;
+    d->cap_bx0 = sb0; d->cap_by0 = sb1; d->cap_bx1 = sb2; d->cap_by1 = sb3;
+  }
   return R_NilValue;
 }
 
