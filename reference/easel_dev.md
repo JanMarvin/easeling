@@ -18,7 +18,8 @@ easel_dev(
   dims = NULL,
   wb = NULL,
   sheet = 1,
-  text_voff = 0.35
+  text_voff = 0.35,
+  metrics = NULL
 )
 ```
 
@@ -26,7 +27,8 @@ easel_dev(
 
 - file:
 
-  Path to the output XML file. Defaults to a temp file.
+  Path of the XML file to write. Defaults to a temp file. For a plain
+  string instead of a file, see \[easel_xml()\].
 
 - width, height:
 
@@ -77,6 +79,19 @@ easel_dev(
   see \`system.file("examples", "calibrate_text.R", package =
   "easeling")\`.
 
+- metrics:
+
+  Font metrics used for text layout (string widths, vertical centring,
+  margins). \`NULL\` (default): use real metrics for \`fontname\` via
+  the \`systemfonts\` package when it is installed, otherwise the
+  built-in Calibri-like table. \`FALSE\`: always use the built-in table.
+  Or a list with numeric components \`widths\`, \`ascents\`,
+  \`descents\`, each of length 95 giving em fractions for the ASCII
+  characters 32..126. Metrics only affect what R computes - rendering is
+  always done by the spreadsheet application with the real font - but
+  better metrics mean legend boxes, margins, and centring are sized for
+  the text that will actually appear.
+
 ## Value
 
 The output file path, invisibly.
@@ -87,6 +102,6 @@ The output file path, invisibly.
 f <- easel_dev(width = 6, height = 4, fontname = "Georgia")
 plot(1:10, (1:10)^2, type = "b")
 dev.off()
-#> agg_record_1a681f6f142b 
+#> agg_record_1a037a361525 
 #>                       2 
 ```

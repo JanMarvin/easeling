@@ -54,7 +54,8 @@ dependency on Cairo, FreeType, fontconfig, or xml2.</p>
 <span>  dims <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  wb <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  sheet <span class="op">=</span> <span class="fl">1</span>,</span>
-<span>  text_voff <span class="op">=</span> <span class="fl">0.35</span></span>
+<span>  text_voff <span class="op">=</span> <span class="fl">0.35</span>,</span>
+<span>  metrics <span class="op">=</span> <span class="cn">NULL</span></span>
 <span><span class="op">)</span></span></code></pre></div>
     </div>
 
@@ -63,7 +64,8 @@ dependency on Cairo, FreeType, fontconfig, or xml2.</p>
 
 
 <dl><dt id="arg-file">file<a class="anchor" aria-label="anchor" href="#arg-file"></a></dt>
-<dd><p>Path to the output XML file. Defaults to a temp file.</p></dd>
+<dd><p>Path of the XML file to write. Defaults to a temp file.
+For a plain string instead of a file, see [easel_xml()].</p></dd>
 
 
 <dt id="arg-width-height">width, height<a class="anchor" aria-label="anchor" href="#arg-width-height"></a></dt>
@@ -115,6 +117,19 @@ decrease to shift it down, if your spreadsheet application's line
 layout places it visibly off; see
 `system.file("examples", "calibrate_text.R", package = "easeling")`.</p></dd>
 
+
+<dt id="arg-metrics">metrics<a class="anchor" aria-label="anchor" href="#arg-metrics"></a></dt>
+<dd><p>Font metrics used for text layout (string widths,
+vertical centring, margins). `NULL` (default): use real metrics for
+`fontname` via the `systemfonts` package when it is installed,
+otherwise the built-in Calibri-like table. `FALSE`: always use the
+built-in table. Or a list with numeric components `widths`,
+`ascents`, `descents`, each of length 95 giving em fractions for the
+ASCII characters 32..126. Metrics only affect what R computes -
+rendering is always done by the spreadsheet application with the real
+font - but better metrics mean legend boxes, margins, and centring
+are sized for the text that will actually appear.</p></dd>
+
 </dl></div>
     <div class="section level2">
     <h2 id="value">Value<a class="anchor" aria-label="anchor" href="#value"></a></h2>
@@ -126,7 +141,7 @@ layout places it visibly off; see
     <div class="sourceCode"><pre class="sourceCode r"><code><span class="r-in"><span><span class="va">f</span> <span class="op">&lt;-</span> <span class="fu">easel_dev</span><span class="op">(</span>width <span class="op">=</span> <span class="fl">6</span>, height <span class="op">=</span> <span class="fl">4</span>, fontname <span class="op">=</span> <span class="st">"Georgia"</span><span class="op">)</span></span></span>
 <span class="r-in"><span><span class="fu"><a href="https://rdrr.io/r/graphics/plot.default.html" class="external-link">plot</a></span><span class="op">(</span><span class="fl">1</span><span class="op">:</span><span class="fl">10</span>, <span class="op">(</span><span class="fl">1</span><span class="op">:</span><span class="fl">10</span><span class="op">)</span><span class="op">^</span><span class="fl">2</span>, type <span class="op">=</span> <span class="st">"b"</span><span class="op">)</span></span></span>
 <span class="r-in"><span><span class="fu"><a href="https://rdrr.io/r/grDevices/dev.html" class="external-link">dev.off</a></span><span class="op">(</span><span class="op">)</span></span></span>
-<span class="r-out co"><span class="r-pr">#&gt;</span> agg_record_1a681f6f142b </span>
+<span class="r-out co"><span class="r-pr">#&gt;</span> agg_record_1a037a361525 </span>
 <span class="r-out co"><span class="r-pr">#&gt;</span>                       2 </span>
 </code></pre></div>
     </div>
