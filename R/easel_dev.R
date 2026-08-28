@@ -94,7 +94,8 @@ easel_dev_impl <- function(file, env, width = 6, height = 6,
   invisible(.Call(C_easeling_, file, width, height, pointsize, fontname,
                   isTRUE(as.logical(underline[1L])),
                   isTRUE(as.logical(strikeout[1L])), text_voff, env,
-                  resolve_metrics(metrics, fontname)))
+                  resolve_metrics(metrics, fontname),
+                  if (has_systemfonts()) glyph_chars))
   invisible(file)
 }
 
@@ -251,4 +252,31 @@ resolve_metrics <- function(metrics, fontname) {
 
 has_systemfonts <- function() {
   requireNamespace("systemfonts", quietly = TRUE)
+}
+
+.glyph_cache <- new.env(parent = emptyenv())
+
+# Map font-internal glyph ids back to characters using the font's cmap,
+# queried through systemfonts over a broad candidate set. Unknown ids map
+# to "". Called from C during glyph rendering (R >= 4.3).
+glyph_chars <- function(file, index, ids) {
+  key <- paste0(file, "#", index)
+  map <- .glyph_cache[[key]]
+  if (is.null(map)) {
+    cand <- c(32:126, 160:383, 913:1023, 1024:1279, 8192:8303, 8352:8399,
+              8592:8703, 8704:8959)
+    chars <- intToUtf8(cand, multiple = TRUE)
+    gi <- tryCatch(
+      systemfonts::glyph_info(chars, path = file, index = index),
+      error = function(e) NULL                                  # nocov
+    )
+    if (is.null(gi)) return(character(length(ids)))             # nocov
+    keep <- !is.na(gi$index) & gi$index > 0 & !duplicated(gi$index)
+    map <- chars[keep]
+    names(map) <- gi$index[keep]
+    .glyph_cache[[key]] <- map
+  }
+  out <- unname(map[as.character(ids)])
+  out[is.na(out)] <- ""
+  out
 }

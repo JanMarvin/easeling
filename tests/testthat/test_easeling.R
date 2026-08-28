@@ -1,6 +1,6 @@
 # Helpers -----------------------------------------------------------------
 
-read_xml_text <- function(file) paste(readLines(file, warn = FALSE), collapse = "")
+read_xml_text <- function(file) paste(readLines(file, warn = FALSE, encoding = "UTF-8"), collapse = "")
 
 expect_wellformed_fragment <- function(file) {
   body <- read_xml_text(file)
@@ -888,7 +888,7 @@ test_that("a path that vanishes before close warns instead of erroring", {
 test_that("internal entry point rejects memory mode without an environment", {
   expect_error(
     .Call(easeling:::C_easeling_, NULL, 3, 3, 12, "Calibri",
-          FALSE, FALSE, 0.35, NULL, NULL),
+          FALSE, FALSE, 0.35, NULL, NULL, NULL),
     "environment"
   )
 })
@@ -938,7 +938,7 @@ test_that("invalid metrics are rejected", {
                "finite non-negative")
   expect_error(
     .Call(easeling:::C_easeling_, NULL, 3, 3, 12, "Calibri",
-          FALSE, FALSE, 0.35, new.env(), c(1, 2, 3)),
+          FALSE, FALSE, 0.35, new.env(), c(1, 2, 3), NULL),
     "285")
 })
 
@@ -1245,23 +1245,20 @@ test_that("Greiner-Hormann containment and disjoint cases", {
   }
   # subject fully inside the star: kept whole
   f <- in_star_clip(function() {
-    grid::grid.rect(
-      x = .5, y = .55, width = .1, height = .1,
-      gp = grid::gpar(fill = "red", col = NA))
+    grid::grid.rect(x = .5, y = .55, width = .1, height = .1,
+                    gp = grid::gpar(fill = "red", col = NA))
   })
   expect_equal(count_matches(f, "<xdr:sp "), 1)
   # subject fully outside (in the notch below the star's waist, off-arm)
   f <- in_star_clip(function() {
-    grid::grid.rect(
-      x = .5, y = .12, width = .06, height = .06,
-      gp = grid::gpar(fill = "red", col = NA))
+    grid::grid.rect(x = .5, y = .12, width = .06, height = .06,
+                    gp = grid::gpar(fill = "red", col = NA))
   })
   expect_equal(count_matches(f, "<xdr:sp "), 0)
   # wide band across both lower arms: two fill pieces
   f <- in_star_clip(function() {
-    grid::grid.rect(
-      x = .5, y = .28, width = 1, height = .08,
-      gp = grid::gpar(fill = "red", col = NA))
+    grid::grid.rect(x = .5, y = .28, width = 1, height = .08,
+                    gp = grid::gpar(fill = "red", col = NA))
   })
   expect_gte(count_matches(f, "<a:custGeom>"), 2)
 })
@@ -1309,4 +1306,86 @@ test_that("paths and rotated rasters split into pieces under a star clip", {
   grid::popViewport()
   dev.off()
   expect_gte(count_matches(f, "<a:custGeom>"), 3)
+})
+
+# Glyph API (R >= 4.3) --------------------------------------------------------
+
+make_glyphs <- function(chars, size = 24, col = "black") {
+  path <- systemfonts::match_fonts("DejaVu Sans")$path
+  fonts <- grDevices::glyphFontList(grDevices::glyphFont(
+    path, 0, "DejaVu Sans", 400, "normal"))
+  ids <- systemfonts::glyph_info(chars, family = "DejaVu Sans")$index
+  grDevices::glyphInfo(id = ids, x = 10 + 18 * seq_along(chars) - 18,
+                       y = rep(40, length(chars)), font = 1L, size = size,
+                       fontList = fonts, width = 100, height = 30, col = col)
+}
+
+test_that("glyph-based text renders as positioned per-glyph runs", {
+  skip_if_not(getRversion() >= "4.3.0")
+  skip_if_not_installed("systemfonts")
+  f <- easel_dev(width = 3, height = 2, metrics = FALSE)
+  plot.new()
+  grid::grid.glyph(make_glyphs(c("H", "i", "\u00e9"), col = "forestgreen"))
+  dev.off()
+  txt <- read_xml_text(f)
+  expect_match(txt, "<a:t>H</a:t>", fixed = TRUE)
+  expect_match(txt, "<a:t>\u00e9</a:t>", fixed = TRUE)
+  expect_match(txt, 'typeface="DejaVu Sans"', fixed = TRUE)
+  expect_match(txt, 'sz="2400"', fixed = TRUE)
+  expect_match(txt, '<a:srgbClr val="228B22"', fixed = TRUE)
+})
+
+test_that("device capabilities are declared accurately", {
+  skip_if_not(getRversion() >= "4.3.0")
+  f <- easel_dev(width = 2, height = 2, metrics = FALSE)
+  caps <- grDevices::dev.capabilities()
+  dev.off()
+  expect_equal(caps$rasterImage, "yes")
+  expect_equal(caps$clippingPaths, TRUE)
+  expect_equal(caps$glyphs, TRUE)
+  expect_false(isTRUE(caps$compositing))
+})
+
+test_that("unmapped glyph ids warn once and are dropped", {
+  skip_if_not(getRversion() >= "4.3.0")
+  skip_if_not_installed("systemfonts")
+  gi <- make_glyphs(c("H", "i"))
+  gi$glyphs$id[2] <- 999999L
+  f <- easel_dev(width = 3, height = 2, metrics = FALSE)
+  plot.new()
+  expect_warning(grid::grid.glyph(gi), "mapping")
+  dev.off()
+  txt <- read_xml_text(f)
+  expect_match(txt, "<a:t>H</a:t>", fixed = TRUE)
+  expect_equal(count_matches(f, "<a:t>"), 1)
+})
+
+test_that("without systemfonts, glyphs warn loudly instead of vanishing", {
+  skip_if_not(getRversion() >= "4.3.0")
+  skip_if_not_installed("systemfonts")
+  gi <- make_glyphs("H")   # built while systemfonts is available
+  testthat::local_mocked_bindings(
+    has_systemfonts = function() FALSE, .package = "easeling"
+  )
+  f <- easel_dev(width = 3, height = 2, metrics = FALSE)
+  plot.new()
+  expect_warning(grid::grid.glyph(gi), "systemfonts")
+  dev.off()
+  expect_equal(count_matches(f, "<a:t>"), 0)
+})
+
+
+test_that("a failing glyph lookup drops the glyphs without crashing", {
+  skip_if_not(getRversion() >= "4.3.0")
+  skip_if_not_installed("systemfonts")
+  gi <- make_glyphs("H")
+  testthat::local_mocked_bindings(
+    glyph_chars = function(file, index, ids) stop("lookup broke"),
+    .package = "easeling"
+  )
+  f <- easel_dev(width = 3, height = 2, metrics = FALSE)
+  plot.new()
+  grid::grid.glyph(gi)
+  dev.off()
+  expect_equal(count_matches(f, "<a:t>"), 0)
 })

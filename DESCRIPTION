@@ -1,13 +1,19 @@
 Package: easeling
 Type: Package
-Title: Minimal DrawingML Graphics Device for openxlsx2
-Version: 0.2
+Title: Minimal 'DrawingML' Graphics Device for 'openxlsx2'
+Version: 0.3.0
 Authors@R: c(
   person("Jan Marvin", "Garbuszus", email = "jan.garbuszus@ruhr-uni-bochum.de", role = c("aut", "cre"))
   )
-Description: A base-R graphics device that writes R plots directly as
-    OOXML DrawingML shapes, for use with `openxlsx2::wb_add_drawing()`.
-    No dependency on Cairo, FreeType, fontconfig, or xml2.
+Description: A base R graphics device that writes plots directly as
+    'OOXML' 'DrawingML' vector shapes (ECMA-376,
+    <https://ecma-international.org/publications-and-standards/standards/ecma-376/>),
+    for adding editable graphics to spreadsheets with
+    'openxlsx2' (via its wb_add_drawing() function). Has no dependency on
+    'cairo', 'FreeType', 'fontconfig', or 'xml2'; real font metrics are
+    used when the 'systemfonts' package is available.
+URL: https://github.com/JanMarvin/easeling
+BugReports: https://github.com/JanMarvin/easeling/issues
 License: MIT + file LICENSE
 Encoding: UTF-8
 Depends: R (>= 3.6.0)

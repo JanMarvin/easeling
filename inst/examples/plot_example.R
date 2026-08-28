@@ -8,4 +8,4 @@ dev.off()
 x <- read_xml(f, pointer = FALSE)
 
 wb <- wb_workbook()$add_worksheet()$add_drawing(xml = x, dims = "A1:G15")
-wb$open()
+if (interactive()) wb$open()

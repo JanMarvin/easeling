@@ -15,4 +15,4 @@ grid::grid.circle(
 dev.off()
 
 wb <- wb_workbook()$add_worksheet()$add_drawing(xml = f, dims = "A1")
-wb$open()
+if (interactive()) wb$open()

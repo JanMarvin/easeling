@@ -54,6 +54,8 @@ typedef struct {
   membuf out;
   char *path;      /* NULL: return the drawing as a string via result_env */
   SEXP result_env;
+  SEXP glyph_fun;  /* easeling:::glyph_chars, or NULL without systemfonts */
+  int glyph_warned_nosf, glyph_warned_unmapped;
   int shape_id;
   int page;
   double clip_x0, clip_y0, clip_x1, clip_y1;
@@ -513,16 +515,21 @@ typedef struct gh_node {
   int intersect, entry, visited;
 } gh_node;
 
+/* callers guarantee n >= 3 (gh_clip guards its inputs) */
 static gh_node *gh_make_list(const double *x, const double *y, int n,
                              gh_node *pool, int *used, double shear) {
-  gh_node *first = NULL, *last = NULL;
-  for (int i = 0; i < n; i++) {
+  gh_node *first = &pool[(*used)++];
+  memset(first, 0, sizeof(*first));
+  first->x = x[0] + shear * y[0];
+  first->y = y[0];
+  gh_node *last = first;
+  for (int i = 1; i < n; i++) {
     gh_node *nd = &pool[(*used)++];
     memset(nd, 0, sizeof(*nd));
     nd->x = x[i] + shear * y[i];
     nd->y = y[i];
-    if (last) { last->next = nd; nd->prev = last; }
-    else first = nd;
+    last->next = nd;
+    nd->prev = last;
     last = nd;
   }
   last->next = first;
@@ -562,6 +569,7 @@ static int gh_point_in(const gh_node *ring, double px, double py) {
 static int gh_clip(const double *sx, const double *sy, int sn,
                    const double *cx, const double *cy, int cn,
                    double *outx, double *outy, int *outn, int max_pts) {
+  if (sn < 3 || cn < 3) return 0;
   const double SHEAR = 1e-9;
   /* count proper crossings first so node storage is exact */
   int ni = 0;
@@ -1207,6 +1215,7 @@ static void Xdr_Close(pDevDesc dd) {
     UNPROTECT(1);
     R_ReleaseObject(d->result_env);
   }
+  if (d->glyph_fun != NULL) R_ReleaseObject(d->glyph_fun);
   free(d->out.data);
   free(d);
 }
@@ -1732,7 +1741,7 @@ static int capture_region(xdrDesc *d, SEXP fn, int kind, int luminance) {
   d->mask_hidden_ink = 0;
   SEXP call = PROTECT(Rf_lang1(fn));
   int err = 0;
-  R_tryEval(call, R_GlobalEnv, &err);
+  R_tryEvalSilent(call, R_GlobalEnv, &err);
   UNPROTECT(1);
   d->capturing = 0;
   if (err || !d->cap_any) return 0;
@@ -1818,6 +1827,119 @@ static SEXP Xdr_SetMask(SEXP path, SEXP ref, pDevDesc dd) {
   return R_NilValue;
 }
 
+static void Xdr_Text(double x, double y, const char *str, double rot,
+                     double hadj, const pGEcontext gc, pDevDesc dd);
+
+#if R_GE_version >= 16
+static SEXP Xdr_Capabilities(SEXP cap) {
+  /* value coding: 1 = no, 2 = yes; patterns and masks take vectors of the
+   supported type constants. Hard masks and arbitrary simple clip regions
+   are implemented; tiling patterns, compositing, groups, and paths take
+   engine fallbacks */
+  SET_VECTOR_ELT(cap, R_GE_capability_semiTransparency, Rf_ScalarInteger(2));
+  SET_VECTOR_ELT(cap, R_GE_capability_transparentBackground, Rf_ScalarInteger(2));
+  SET_VECTOR_ELT(cap, R_GE_capability_rasterImage, Rf_ScalarInteger(2));
+  {
+    SEXP pat = PROTECT(Rf_allocVector(INTSXP, 2));
+    INTEGER(pat)[0] = R_GE_linearGradientPattern;
+    INTEGER(pat)[1] = R_GE_radialGradientPattern;
+    SET_VECTOR_ELT(cap, R_GE_capability_patterns, pat);
+    UNPROTECT(1);
+  }
+  SET_VECTOR_ELT(cap, R_GE_capability_clippingPaths, Rf_ScalarInteger(2));
+  {
+    SEXP mk = PROTECT(Rf_allocVector(INTSXP, 2));
+    INTEGER(mk)[0] = R_GE_alphaMask;
+    INTEGER(mk)[1] = R_GE_luminanceMask;
+    SET_VECTOR_ELT(cap, R_GE_capability_masks, mk);
+    UNPROTECT(1);
+  }
+  SET_VECTOR_ELT(cap, R_GE_capability_compositing, Rf_ScalarInteger(1));
+  SET_VECTOR_ELT(cap, R_GE_capability_transformations, Rf_ScalarInteger(1));
+  SET_VECTOR_ELT(cap, R_GE_capability_paths, Rf_ScalarInteger(1));
+  SET_VECTOR_ELT(cap, R_GE_capability_glyphs, Rf_ScalarInteger(2));
+  return cap;
+}
+
+/* groups/paths declare capability "no", so the engine renders their
+ fallbacks and never reaches these */
+/* # nocov start */
+static SEXP Xdr_DefineGroup(SEXP source, int op, SEXP destination, pDevDesc dd) {
+  (void) source; (void) op; (void) destination; (void) dd;   /* # nocov */
+  return R_NilValue;                                         /* # nocov */
+}
+static void Xdr_UseGroup(SEXP ref, SEXP trans, pDevDesc dd) {
+  (void) ref; (void) trans; (void) dd;                       /* # nocov */
+}
+static void Xdr_ReleaseGroup(SEXP ref, pDevDesc dd) {
+  (void) ref; (void) dd;
+}
+static void Xdr_Stroke(SEXP path, const pGEcontext gc, pDevDesc dd) {
+  (void) path; (void) gc; (void) dd;                         /* # nocov */
+}
+static void Xdr_Fill(SEXP path, int rule, const pGEcontext gc, pDevDesc dd) {
+  (void) path; (void) rule; (void) gc; (void) dd;            /* # nocov */
+}
+static void Xdr_FillStroke(SEXP path, int rule, const pGEcontext gc, pDevDesc dd) {
+  (void) path; (void) rule; (void) gc; (void) dd;
+}
+/* # nocov end */
+
+static void Xdr_Glyph(int n, int *glyphs, double *x, double *y,
+                      SEXP font, double size, int colour, double rot,
+                      pDevDesc dd) {
+  xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  if (d->capturing || n < 1) return;
+  if (d->glyph_fun == NULL) {
+    if (!d->glyph_warned_nosf) {
+      Rf_warning("easeling: glyph-based text (e.g. marquee) requires the "
+                 "systemfonts package to map glyphs to characters; "
+                 "glyphs dropped");
+      d->glyph_warned_nosf = 1;
+    }
+    return;
+  }
+  SEXP ids = PROTECT(Rf_allocVector(INTSXP, n));
+  memcpy(INTEGER(ids), glyphs, (size_t) n * sizeof(int));
+  SEXP call = PROTECT(Rf_lang4(d->glyph_fun,
+                               Rf_mkString(R_GE_glyphFontFile(font)),
+                               Rf_ScalarInteger(R_GE_glyphFontIndex(font)),
+                               ids));
+  int err = 0;
+  SEXP chars = R_tryEvalSilent(call, R_GlobalEnv, &err);
+  if (err || chars == NULL || TYPEOF(chars) != STRSXP ||
+      Rf_xlength(chars) != n) {
+    UNPROTECT(2);
+    return;
+  }
+  PROTECT(chars);
+
+  R_GE_gcontext gc;
+  memset(&gc, 0, sizeof(gc));
+  gc.cex = 1.0;
+  gc.ps = size;
+  gc.col = colour;
+  double weight = R_GE_glyphFontWeight(font);
+  int italic = (R_GE_glyphFontStyle(font) != R_GE_text_style_normal);
+  gc.fontface = (weight >= 700.0) ? (italic ? 4 : 2) : (italic ? 3 : 1);
+  strncpy(gc.fontfamily, R_GE_glyphFontFamily(font),
+          sizeof(gc.fontfamily) - 1);
+
+  int unmapped = 0;
+  for (int i = 0; i < n; i++) {
+    const char *ch = Rf_translateCharUTF8(STRING_ELT(chars, i));
+    if (ch[0] == '\0') { unmapped++; continue; }
+    Xdr_Text(x[i], y[i], ch, rot, 0.0, &gc, dd);
+  }
+  if (unmapped && !d->glyph_warned_unmapped) {
+    Rf_warning("easeling: %d glyph(s) had no character mapping in the font "
+               "cmap and were dropped", unmapped);
+    d->glyph_warned_unmapped = 1;
+  }
+  UNPROTECT(3);
+}
+#endif
+
 static void Xdr_ReleaseMask(SEXP ref, pDevDesc dd) {
   (void) ref; (void) dd;
 }
@@ -1825,7 +1947,8 @@ static void Xdr_ReleaseMask(SEXP ref, pDevDesc dd) {
 
 SEXP easeling_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
                SEXP fontname_, SEXP underline_, SEXP strikeout_,
-               SEXP text_voff_, SEXP result_env_, SEXP metrics_) {
+               SEXP text_voff_, SEXP result_env_, SEXP metrics_,
+               SEXP glyph_fun_) {
   const char *path = (path_ == R_NilValue) ? NULL : CHAR(STRING_ELT(path_, 0));
   if (path == NULL && TYPEOF(result_env_) != ENVSXP)
     Rf_error("internal: memory output needs an environment");
@@ -1866,6 +1989,10 @@ SEXP easeling_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
   xd->clip_x1 = width * 72.0; xd->clip_y1 = height * 72.0;
   strncpy(xd->fontname, fontname, sizeof(xd->fontname) - 1);
   xd->text_voff = REAL(text_voff_)[0];
+  if (Rf_isFunction(glyph_fun_)) {
+    xd->glyph_fun = glyph_fun_;
+    R_PreserveObject(xd->glyph_fun);
+  }
   if (metrics_ != R_NilValue) {
     if (TYPEOF(metrics_) != REALSXP || Rf_xlength(metrics_) != 285)
       Rf_error("internal: metrics must be a numeric vector of length 285");
@@ -1965,7 +2092,9 @@ SEXP easeling_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
   dd->haveCapture = 1; /* no - dd->cap is NULL; R checks before calling, so safe */
   dd->haveLocator = 1; /* no - dd->locator is NULL; R checks before calling, so safe */
 
-#if R_GE_version >= 13
+#if R_GE_version >= 16
+  dd->deviceVersion = R_GE_glyphs;
+#elif R_GE_version >= 13
   /* deviceVersion and deviceClip only exist from R 4.1 (GE 13); older
    engines assume version-12 behaviour and engine-side clipping checks */
   dd->deviceVersion = R_GE_definitions;
@@ -1982,6 +2111,16 @@ SEXP easeling_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
   dd->setMask = Xdr_SetMask;
   dd->releaseMask = Xdr_ReleaseMask;
 #endif
+#if R_GE_version >= 16
+  dd->capabilities = Xdr_Capabilities;
+  dd->defineGroup = Xdr_DefineGroup;
+  dd->useGroup = Xdr_UseGroup;
+  dd->releaseGroup = Xdr_ReleaseGroup;
+  dd->stroke = Xdr_Stroke;
+  dd->fill = Xdr_Fill;
+  dd->fillStroke = Xdr_FillStroke;
+  dd->glyph = Xdr_Glyph;
+#endif
 
   pGEDevDesc gdd = GEcreateDevDesc(dd);
   GEaddDevice2(gdd, "easeling");
@@ -1991,7 +2130,7 @@ SEXP easeling_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
 }
 
 static const R_CallMethodDef CallEntries[] = {
-  {"easeling_", (DL_FUNC) &easeling_, 10},
+  {"easeling_", (DL_FUNC) &easeling_, 11},
   {NULL, NULL, 0}
 };
 

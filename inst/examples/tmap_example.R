@@ -2,13 +2,13 @@ library(easeling)
 library(openxlsx2)
 library(tmap)
 
+# tmap objects (like ggplot2 objects) only draw when printed, so a bare
+# tm_shape(...) + ... inside a script or easel_xml() draws nothing.
+xml <- easel_xml(print(
+  tm_shape(World) +
+    tm_polygons(fill = "HPI")
+), width = 6, height = 4)
 
-f <- easel_dev(width = 6, height = 4)
-tm_shape(World) +
-  tm_polygons(fill = "HPI")
-dev.off()
+wb <- wb_workbook()$add_worksheet()$add_drawing(xml = xml, dims = "A1:G15")
 
-x <- read_xml(f, pointer = FALSE)
-
-wb <- wb_workbook()$add_worksheet()$add_drawing(xml = x, dims = "A1:G15")
-wb$open()
+if (interactive()) wb$open()
