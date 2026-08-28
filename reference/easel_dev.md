@@ -102,6 +102,6 @@ The output file path, invisibly.
 f <- easel_dev(width = 6, height = 4, fontname = "Georgia")
 plot(1:10, (1:10)^2, type = "b")
 dev.off()
-#> agg_record_1a9d1f948392 
+#> agg_record_1a5e7833a5a5 
 #>                       2 
 ```
