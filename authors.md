@@ -7,7 +7,7 @@
 ## Citation
 
 Source:
-[`DESCRIPTION`](https://github.com/JanMarvin/easeling/blob/main/DESCRIPTION)
+[`DESCRIPTION`](https://github.com/JanMarvin/easeling/blob/0.3.0/DESCRIPTION)
 
 Garbuszus J (2026). *easeling: Minimal 'DrawingML' Graphics Device for
 'openxlsx2'*. R package version 0.3.0,
