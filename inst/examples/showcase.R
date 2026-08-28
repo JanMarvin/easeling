@@ -5,10 +5,11 @@ library(easeling)
 library(openxlsx2)
 
 wb <- wb_workbook()$add_worksheet("gallery", grid_lines = FALSE)
-row <- 1
+gallery <- new.env()
+gallery$row <- 1
 put <- function(xml) {
-  wb$add_drawing(xml = xml, dims = paste0("A", row))
-  row <<- row + 22
+  wb$add_drawing(xml = xml, dims = paste0("A", gallery$row))
+  assign("row", gallery$row + 22, envir = gallery)
 }
 
 put(easel_xml({
@@ -36,6 +37,8 @@ put(easel_xml({
                   gp = grid::gpar(col = "white", cex = 1.2))
 }, width = 8, height = 4))
 
+# nolint start: object_usage_linter. (ggplot2 is optional; aes() columns
+# cannot be resolved by static analysis when it is absent)
 if (requireNamespace("ggplot2", quietly = TRUE)) {
   library(ggplot2)
   put(easel_xml(print(
@@ -48,5 +51,6 @@ if (requireNamespace("ggplot2", quietly = TRUE)) {
   ), width = 8, height = 4))
 }
 
+# nolint end
 wb$save("showcase.xlsx")
 cat("wrote showcase.xlsx\n")

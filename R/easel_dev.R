@@ -75,9 +75,11 @@ easel_dev_impl <- function(file, env, width = 6, height = 6,
                      metrics = NULL) {
   if (!is.null(dims)) {
     sz <- easel_size(dims, wb = wb, sheet = sheet)
-    width <- sz[["width"]]; height <- sz[["height"]]
+    width <- sz[["width"]]
+    height <- sz[["height"]]
   }
-  width <- as.double(width[1L]); height <- as.double(height[1L])
+  width <- as.double(width[1L])
+  height <- as.double(height[1L])
   pointsize <- as.double(pointsize[1L])
   if (!is.finite(width) || width <= 0 || !is.finite(height) || height <= 0)
     stop("'width' and 'height' must be positive")
@@ -164,7 +166,8 @@ easel_size <- function(dims, wb = NULL, sheet = 1) {
     col <- sum(letters * 26L^rev(seq_along(letters) - 1L))
     c(col = col, row = as.integer(m[3L]))
   }
-  a <- ref(parts[1L]); b <- ref(parts[2L])
+  a <- ref(parts[1L])
+  b <- ref(parts[2L])
   cols <- seq.int(min(a["col"], b["col"]), max(a["col"], b["col"]))
   rows <- seq.int(min(a["row"], b["row"]), max(a["row"], b["row"]))
 
@@ -193,7 +196,8 @@ easel_size <- function(dims, wb = NULL, sheet = 1) {
       if (!is.na(v)) row_ht[] <- v
     }
     for (cl in ws$cols_attr) {
-      cmin <- num_attr(cl, "min"); cmax <- num_attr(cl, "max")
+      cmin <- num_attr(cl, "min")
+      cmax <- num_attr(cl, "max")
       wdt <- num_attr(cl, "width")
       if (anyNA(c(cmin, cmax, wdt))) next
       hit <- cols >= cmin & cols <= cmax

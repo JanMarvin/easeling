@@ -61,7 +61,7 @@ typedef struct {
   /* shaped clip path (R >= 4.1 viewport(clip = grob)): one convex ring,
    captured by replaying the clip grob through the draw callbacks */
 #define CLIP_RING_MAX 128
-  int capturing, clip_shaped, cap_fail, ring_n;
+  int capturing, clip_shaped, cap_fail, ring_n, ring_convex;
   double ring_x[CLIP_RING_MAX], ring_y[CLIP_RING_MAX];
   double cap_bx0, cap_by0, cap_bx1, cap_by1;   /* bbox of ALL captured ink */
   int cap_any;
@@ -70,7 +70,7 @@ typedef struct {
   int cap_kind;              /* 0 = clip path, 1 = mask */
   int cap_luminance;         /* mask capture: luminance semantics */
   int mask_soft, mask_hidden_ink;
-  int mask_shaped, mask_n;
+  int mask_shaped, mask_n, mask_convex;
   double mask_x[CLIP_RING_MAX], mask_y[CLIP_RING_MAX];
   double mask_bx0, mask_by0, mask_bx1, mask_by1;
   double cw[95], ca[95], cd2[95];  /* optional per-char metrics, em */
@@ -177,7 +177,11 @@ static void emit_gradient_stops_radial(xdrDesc *d, SEXP pattern) {
 }
 #endif
 
-static void fill_props_gc(xdrDesc *d, const pGEcontext gc) {
+/* bx0..by1: the emitted shape's bounding box in device pt, needed to place
+ the radial gradient focus (R gives absolute coords, fillToRect wants
+ fractions of the shape box) */
+static void fill_props_gc(xdrDesc *d, const pGEcontext gc,
+                          double bx0, double by0, double bx1, double by1) {
 #if R_GE_version >= 13
   if (gc->patternFill != R_NilValue && R_GE_isPattern(gc->patternFill)) {
     int type = R_GE_patternType(gc->patternFill);
@@ -194,11 +198,23 @@ static void fill_props_gc(xdrDesc *d, const pGEcontext gc) {
       mb_printf(&d->out, "<a:lin ang=\"%d\" scaled=\"0\"/></a:gradFill>", ang_60000);
       return;
     } else if (type == R_GE_radialGradientPattern) {
+      /* place the focus at R's start-circle centre, as a fraction of the
+       shape box; the end radius cannot be expressed - OOXML radial
+       gradients always run to the shape edges */
+      double w = bx1 - bx0, h = by1 - by0;
+      double fx = 0.5, fy = 0.5;
+      if (w > 0) fx = (R_GE_radialGradientCX1(gc->patternFill) - bx0) / w;
+      if (h > 0) fy = (R_GE_radialGradientCY1(gc->patternFill) - by0) / h;
+      fx = fmin(fmax(fx, 0.0), 1.0);
+      fy = fmin(fmax(fy, 0.0), 1.0);
+      int l = (int) lround(fx * 100000.0);
+      int t = (int) lround(fy * 100000.0);
       mb_printf(&d->out, "<a:gradFill>");
       emit_gradient_stops_radial(d, gc->patternFill);
       mb_printf(&d->out,
-              "<a:path path=\"circle\"><a:fillToRect l=\"50000\" t=\"50000\" "
-              "r=\"50000\" b=\"50000\"/></a:path></a:gradFill>");
+              "<a:path path=\"circle\"><a:fillToRect l=\"%d\" t=\"%d\" "
+              "r=\"%d\" b=\"%d\"/></a:path><a:tileRect/></a:gradFill>",
+              l, t, 100000 - l, 100000 - t);
       return;
     }
     /* tiling patterns have no clean OOXML equivalent - fall through to noFill */
@@ -480,6 +496,264 @@ static int clip_polygon_ring(const double *x, const double *y, int n,
   return m;
 }
 
+/* ---- Greiner-Hormann: subject ∩ clip for arbitrary simple polygons ----
+ Used when the captured clip/mask ring is non-convex. Degeneracies
+ (subject vertices or edges exactly on clip edges) are broken by a tiny
+ shear of the subject (~1e-9 pt at plot scale, far below EMU resolution),
+ the standard pragmatic robustness fix. Self-intersecting rings are not
+ supported (capture falls back to the bounding box for those cases that
+ produce them: multi-ring regions). */
+
+static int point_in_ring(double px, double py, const double *x,
+                         const double *y, int n);
+
+typedef struct gh_node {
+  double x, y, alpha;
+  struct gh_node *next, *prev, *neighbor;
+  int intersect, entry, visited;
+} gh_node;
+
+static gh_node *gh_make_list(const double *x, const double *y, int n,
+                             gh_node *pool, int *used, double shear) {
+  gh_node *first = NULL, *last = NULL;
+  for (int i = 0; i < n; i++) {
+    gh_node *nd = &pool[(*used)++];
+    memset(nd, 0, sizeof(*nd));
+    nd->x = x[i] + shear * y[i];
+    nd->y = y[i];
+    if (last) { last->next = nd; nd->prev = last; }
+    else first = nd;
+    last = nd;
+  }
+  last->next = first;
+  first->prev = last;
+  return first;
+}
+
+static void gh_insert_sorted(gh_node *edge_start, gh_node *edge_end,
+                             gh_node *nd) {
+  gh_node *p = edge_start;
+  while (p->next != edge_end && p->next->intersect &&
+         p->next->alpha < nd->alpha)
+    p = p->next;
+  nd->next = p->next;
+  nd->prev = p;
+  p->next->prev = nd;
+  p->next = nd;
+}
+
+static int gh_point_in(const gh_node *ring, double px, double py) {
+  int inside = 0;
+  const gh_node *a = ring;
+  do {
+    const gh_node *b = a->next;
+    if (((a->y > py) != (b->y > py)) &&
+        (px < (b->x - a->x) * (py - a->y) / (b->y - a->y) + a->x))
+      inside = !inside;
+    a = b;
+  } while (a != ring);
+  return inside;
+}
+
+/* Intersect subject (sx,sy,sn) with clip ring (cx,cy,cn). Appends result
+ pieces' vertices to (outx,outy) and their sizes to outn; returns the
+ number of pieces (0 = empty intersection). out buffers must hold
+ sn + cn + 2 * (#crossings) points and pieces. */
+static int gh_clip(const double *sx, const double *sy, int sn,
+                   const double *cx, const double *cy, int cn,
+                   double *outx, double *outy, int *outn, int max_pts) {
+  const double SHEAR = 1e-9;
+  /* count proper crossings first so node storage is exact */
+  int ni = 0;
+  for (int i = 0; i < sn; i++) {
+    double ax = sx[i] + SHEAR * sy[i], ay = sy[i];
+    int i2 = (i + 1) % sn;
+    double bx = sx[i2] + SHEAR * sy[i2], by = sy[i2];
+    for (int j = 0; j < cn; j++) {
+      int j2 = (j + 1) % cn;
+      double px = cx[j], py = cy[j], qx = cx[j2], qy = cy[j2];
+      double d1 = (bx - ax) * (qy - py) - (by - ay) * (qx - px);
+      if (d1 == 0.0) continue;
+      double t = ((px - ax) * (qy - py) - (py - ay) * (qx - px)) / d1;
+      double u = ((px - ax) * (by - ay) - (py - ay) * (bx - ax)) / d1;
+      if (t > 0.0 && t < 1.0 && u > 0.0 && u < 1.0) ni++;
+    }
+  }
+  if (ni == 0) {
+    double s0x = sx[0] + SHEAR * sy[0];
+    /* fully inside / outside / clip inside subject */
+    int s_in_c = 0, c_in_s = 0;
+    {
+      int inside = 0;
+      for (int j = 0, k = cn - 1; j < cn; k = j++) {
+        if (((cy[j] > sy[0]) != (cy[k] > sy[0])) &&
+            (s0x < (cx[k] - cx[j]) * (sy[0] - cy[j]) / (cy[k] - cy[j]) + cx[j]))
+          inside = !inside;
+      }
+      s_in_c = inside;
+    }
+    if (s_in_c) {
+      if (sn > max_pts) return 0;
+      for (int i = 0; i < sn; i++) { outx[i] = sx[i]; outy[i] = sy[i]; }
+      outn[0] = sn;
+      return 1;
+    }
+    {
+      int inside = 0;
+      for (int i = 0, k = sn - 1; i < sn; k = i++) {
+        if (((sy[i] > cy[0]) != (sy[k] > cy[0])) &&
+            (cx[0] < (sx[k] - sx[i]) * (cy[0] - sy[i]) / (sy[k] - sy[i]) + sx[i]))
+          inside = !inside;
+      }
+      c_in_s = inside;
+    }
+    if (c_in_s) {
+      if (cn > max_pts) return 0;
+      for (int j = 0; j < cn; j++) { outx[j] = cx[j]; outy[j] = cy[j]; }
+      outn[0] = cn;
+      return 1;
+    }
+    return 0;
+  }
+
+  int npool = sn + cn + 2 * ni;
+  gh_node *pool = (gh_node *) R_alloc((size_t) npool, sizeof(gh_node));
+  int used = 0;
+  gh_node *S = gh_make_list(sx, sy, sn, pool, &used, SHEAR);
+  gh_node *C = gh_make_list(cx, cy, cn, pool, &used, 0.0);
+
+  /* create and link intersection nodes */
+  gh_node *sa = S;
+  for (int i = 0; i < sn; i++) {
+    gh_node *sb = sa;
+    do { sb = sb->next; } while (sb->intersect);
+    gh_node *ca = C;
+    for (int j = 0; j < cn; j++) {
+      gh_node *cb = ca;
+      do { cb = cb->next; } while (cb->intersect);
+      double ax = sa->x, ay = sa->y, bx = sb->x, by = sb->y;
+      double px = ca->x, py = ca->y, qx = cb->x, qy = cb->y;
+      double d1 = (bx - ax) * (qy - py) - (by - ay) * (qx - px);
+      if (d1 != 0.0) {
+        double t = ((px - ax) * (qy - py) - (py - ay) * (qx - px)) / d1;
+        double u = ((px - ax) * (by - ay) - (py - ay) * (bx - ax)) / d1;
+        if (t > 0.0 && t < 1.0 && u > 0.0 && u < 1.0) {
+          gh_node *is = &pool[used++];
+          gh_node *ic = &pool[used++];
+          memset(is, 0, sizeof(*is));
+          memset(ic, 0, sizeof(*ic));
+          is->x = ic->x = ax + t * (bx - ax);
+          is->y = ic->y = ay + t * (by - ay);
+          is->alpha = t;
+          ic->alpha = u;
+          is->intersect = ic->intersect = 1;
+          is->neighbor = ic;
+          ic->neighbor = is;
+          gh_insert_sorted(sa, sb, is);
+          gh_insert_sorted(ca, cb, ic);
+        }
+      }
+      ca = cb;
+    }
+    sa = sb;
+  }
+
+  /* mark entry/exit by alternating from the containment of each start */
+  int status = !gh_point_in(C, S->x, S->y);   /* 1 = next crossing enters */
+  for (gh_node *p = S;;) {
+    if (p->intersect) { p->entry = status; status = !status; }
+    p = p->next;
+    if (p == S) break;
+  }
+  status = !gh_point_in(S, C->x, C->y);
+  for (gh_node *p = C;;) {
+    if (p->intersect) { p->entry = status; status = !status; }
+    p = p->next;
+    if (p == C) break;
+  }
+
+  /* trace result pieces */
+  int npieces = 0, total = 0;
+  for (;;) {
+    gh_node *start = NULL;
+    for (gh_node *p = S;;) {
+      if (p->intersect && !p->visited) { start = p; break; }
+      p = p->next;
+      if (p == S) break;
+    }
+    if (!start) break;
+    int count = 0;
+    gh_node *cur = start;
+    do {
+      cur->visited = 1;
+      cur->neighbor->visited = 1;
+      if (cur->entry) {
+        do {
+          if (total >= max_pts) return npieces;
+          outx[total] = cur->x;
+          outy[total] = cur->y;
+          total++;
+          count++;
+          cur = cur->next;
+        } while (!cur->intersect);
+      } else {
+        do {
+          if (total >= max_pts) return npieces;
+          outx[total] = cur->x;
+          outy[total] = cur->y;
+          total++;
+          count++;
+          cur = cur->prev;
+        } while (!cur->intersect);
+      }
+      cur = cur->neighbor;
+    } while (!cur->visited);
+    if (count >= 3) outn[npieces++] = count;
+    else total -= count;                       /* # nocov - tangential sliver */
+  }
+  return npieces;
+}
+
+/* Segment vs arbitrary simple ring: writes up to rn inside sub-segments as
+ t pairs into ts; returns the pair count. */
+static int clip_segment_ring_any(const double *rx, const double *ry, int rn,
+                                 double ax, double ay, double bx, double by,
+                                 double *ts) {
+  double cand[2 + CLIP_RING_MAX];
+  int nc = 0;
+  cand[nc++] = 0.0;
+  double dx = bx - ax, dy = by - ay;
+  for (int j = 0; j < rn; j++) {
+    int j2 = (j + 1) % rn;
+    double px = rx[j], py = ry[j], qx = rx[j2], qy = ry[j2];
+    double d1 = dx * (qy - py) - dy * (qx - px);
+    if (d1 == 0.0) continue;
+    double t = ((px - ax) * (qy - py) - (py - ay) * (qx - px)) / d1;
+    double u = ((px - ax) * dy - (py - ay) * dx) / d1;
+    if (t > 0.0 && t < 1.0 && u >= 0.0 && u <= 1.0) cand[nc++] = t;
+  }
+  cand[nc++] = 1.0;
+  /* insertion sort of the small candidate list */
+  for (int i = 1; i < nc; i++) {
+    double v = cand[i];
+    int j = i - 1;
+    while (j >= 0 && cand[j] > v) { cand[j + 1] = cand[j]; j--; }
+    cand[j + 1] = v;
+  }
+  int k = 0;
+  for (int i = 0; i + 1 < nc; i++) {
+    double t0 = cand[i], t1 = cand[i + 1];
+    if (t1 - t0 < 1e-12) continue;
+    double mt = (t0 + t1) / 2.0;
+    if (point_in_ring(ax + mt * dx, ay + mt * dy, rx, ry, rn)) {
+      ts[2 * k] = t0;
+      ts[2 * k + 1] = t1;
+      k++;
+    }
+  }
+  return k;
+}
+
 /* Cyrus-Beck: clip a segment to the convex ring; FALSE if fully outside. */
 static Rboolean clip_line_ring(const xdrDesc *d, const double *rx,
                                const double *ry, int rn,
@@ -507,52 +781,95 @@ static Rboolean clip_line_ring(const xdrDesc *d, const double *rx,
   return TRUE;
 }
 
-/* Dispatchers: rectangle clip first, then the shaped ring when active. */
-static Rboolean dev_clip_line(const xdrDesc *d, double *x1, double *y1,
-                              double *x2, double *y2) {
-  double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
-  double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
-  if (!clip_line_lb(cx0, cy0, cx1, cy1, x1, y1, x2, y2)) return FALSE;
-  if (d->clip_shaped &&
-      !clip_line_ring(d, d->ring_x, d->ring_y, d->ring_n, x1, y1, x2, y2))
-    return FALSE;
-  if (d->mask_shaped &&
-      !clip_line_ring(d, d->mask_x, d->mask_y, d->mask_n, x1, y1, x2, y2))
-    return FALSE;
-  return TRUE;
+
+/* Clip a polygon against one ring, convex or not. For convex rings this
+ is Sutherland-Hodgman (one piece); otherwise Greiner-Hormann, which can
+ return several pieces. Appends to out arrays; returns piece count. */
+static int clip_ring_dispatch(const double *x, const double *y, int n,
+                              const double *rx, const double *ry, int rn,
+                              int convex,
+                              double *outx, double *outy, int *outn,
+                              int max_pts) {
+  if (convex) {
+    int cap = 2 * (n + rn) + 8;
+    double *b1x = (double *) R_alloc((size_t) cap, sizeof(double));
+    double *b1y = (double *) R_alloc((size_t) cap, sizeof(double));
+    double *b2x = (double *) R_alloc((size_t) cap, sizeof(double));
+    double *b2y = (double *) R_alloc((size_t) cap, sizeof(double));
+    double *ox, *oy;
+    int m = clip_polygon_ring(x, y, n, rx, ry, rn, b1x, b1y, b2x, b2y, &ox, &oy);
+    if (m < 3 || m > max_pts) return 0;
+    for (int i = 0; i < m; i++) { outx[i] = ox[i]; outy[i] = oy[i]; }
+    outn[0] = m;
+    return 1;
+  }
+  return gh_clip(x, y, n, rx, ry, rn, outx, outy, outn, max_pts);
 }
 
-/* Clips against the rect and (if active) the ring; buffers via R_alloc.
- Returns vertex count; *ox and *oy point into the result. */
-static int dev_clip_polygon(const xdrDesc *d, const double *x, const double *y,
-                            int n, double **ox, double **oy) {
+/* Clips against the rect and (if active) the clip and mask rings.
+ Fills piece arrays (vertices flattened into px/py, sizes in pn);
+ returns the piece count. Buffers via R_alloc. */
+static int dev_clip_polygon_multi(const xdrDesc *d, const double *x,
+                                  const double *y, int n,
+                                  double **px, double **py, int **pn) {
   double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
   double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
-  int cap = 2 * (n + 4 + (d->clip_shaped ? d->ring_n : 0)
-                       + (d->mask_shaped ? d->mask_n : 0)) + 8;
+  int rings = (d->clip_shaped ? d->ring_n : 0) + (d->mask_shaped ? d->mask_n : 0);
+  int max_pts = 4 * (n + rings + 16);
+  double *ax = (double *) R_alloc((size_t) max_pts, sizeof(double));
+  double *ay = (double *) R_alloc((size_t) max_pts, sizeof(double));
+  double *bx2 = (double *) R_alloc((size_t) max_pts, sizeof(double));
+  double *by2 = (double *) R_alloc((size_t) max_pts, sizeof(double));
+  int *an = (int *) R_alloc((size_t) max_pts, sizeof(int));
+  int *bn = (int *) R_alloc((size_t) max_pts, sizeof(int));
+
+  int cap = 2 * (n + 4) + 8;
   double *b1x = (double *) R_alloc((size_t) cap, sizeof(double));
   double *b1y = (double *) R_alloc((size_t) cap, sizeof(double));
   double *b2x = (double *) R_alloc((size_t) cap, sizeof(double));
   double *b2y = (double *) R_alloc((size_t) cap, sizeof(double));
-  int m = clip_polygon_sh(x, y, n, cx0, cy0, cx1, cy1, b1x, b1y, b2x, b2y, ox, oy);
-  if (m > 0 && d->clip_shaped) {
-    double *b3x = (double *) R_alloc((size_t) cap, sizeof(double));
-    double *b3y = (double *) R_alloc((size_t) cap, sizeof(double));
-    double *b4x = (double *) R_alloc((size_t) cap, sizeof(double));
-    double *b4y = (double *) R_alloc((size_t) cap, sizeof(double));
-    m = clip_polygon_ring(*ox, *oy, m, d->ring_x, d->ring_y, d->ring_n,
-                          b3x, b3y, b4x, b4y, ox, oy);
+  double *ox, *oy;
+  int m = clip_polygon_sh(x, y, n, cx0, cy0, cx1, cy1, b1x, b1y, b2x, b2y, &ox, &oy);
+  if (m < 3) return 0;
+  int np = 1;
+  for (int i = 0; i < m; i++) { ax[i] = ox[i]; ay[i] = oy[i]; }
+  an[0] = m;
+
+  for (int pass = 0; pass < 2; pass++) {
+    const double *rx, *ry;
+    int rn, convex, active;
+    if (pass == 0) {
+      active = d->clip_shaped;
+      rx = d->ring_x; ry = d->ring_y; rn = d->ring_n; convex = d->ring_convex;
+    } else {
+      active = d->mask_shaped;
+      rx = d->mask_x; ry = d->mask_y; rn = d->mask_n; convex = d->mask_convex;
+    }
+    if (!active) continue;
+    int out_np = 0, out_total = 0, in_off = 0;
+    for (int p = 0; p < np; p++) {
+      int got = clip_ring_dispatch(ax + in_off, ay + in_off, an[p],
+                                   rx, ry, rn, convex,
+                                   bx2 + out_total, by2 + out_total,
+                                   bn + out_np, max_pts - out_total);
+      for (int g = 0; g < got; g++) out_total += bn[out_np + g];
+      out_np += got;
+      in_off += an[p];
+    }
+    if (out_np == 0) return 0;
+    double *t;
+    int *tn;
+    t = ax; ax = bx2; bx2 = t;
+    t = ay; ay = by2; by2 = t;
+    tn = an; an = bn; bn = tn;
+    np = out_np;
   }
-  if (m > 0 && d->mask_shaped) {
-    double *b5x = (double *) R_alloc((size_t) cap, sizeof(double));
-    double *b5y = (double *) R_alloc((size_t) cap, sizeof(double));
-    double *b6x = (double *) R_alloc((size_t) cap, sizeof(double));
-    double *b6y = (double *) R_alloc((size_t) cap, sizeof(double));
-    m = clip_polygon_ring(*ox, *oy, m, d->mask_x, d->mask_y, d->mask_n,
-                          b5x, b5y, b6x, b6y, ox, oy);
-  }
-  return m;
+  *px = ax;
+  *py = ay;
+  *pn = an;
+  return np;
 }
+
 
 static void bbox(const double *x, const double *y, int n, double *x0, double *y0,
                  double *x1, double *y1) {
@@ -595,17 +912,88 @@ static void emit_clipped_polyline(xdrDesc *d, const double *x, const double *y,
 
   for (int i = 0; i < n - 1; i++) {
     double ax = x[i], ay = y[i], bx = x[i + 1], by = y[i + 1];
-    if (!dev_clip_line(d, &ax, &ay, &bx, &by)) {
+    double cx0 = fmin(d->clip_x0, d->clip_x1), cx1 = fmax(d->clip_x0, d->clip_x1);
+    double cy0 = fmin(d->clip_y0, d->clip_y1), cy1 = fmax(d->clip_y0, d->clip_y1);
+    if (!clip_line_lb(cx0, cy0, cx1, cy1, &ax, &ay, &bx, &by)) {
       if (m >= 2) emit_polyline_shape(d, rx, ry, m, gc);
       m = 0;
       continue;
     }
-    if (m > 0 && fabs(rx[m - 1] - ax) < eps && fabs(ry[m - 1] - ay) < eps) {
-      rx[m] = bx; ry[m] = by; m++;
-    } else {
+    /* sub-segments after ring clipping; one full segment when no rings */
+    double ts[2 * (2 + CLIP_RING_MAX)];
+    int nseg = 1;
+    ts[0] = 0.0;
+    ts[1] = 1.0;
+    for (int pass = 0; pass < 2; pass++) {
+      const double *rgx, *rgy;
+      int rgn, convex, active;
+      if (pass == 0) {
+        active = d->clip_shaped;
+        rgx = d->ring_x; rgy = d->ring_y; rgn = d->ring_n; convex = d->ring_convex;
+      } else {
+        active = d->mask_shaped;
+        rgx = d->mask_x; rgy = d->mask_y; rgn = d->mask_n; convex = d->mask_convex;
+      }
+      if (!active) continue;
+      double nts[2 * (2 + CLIP_RING_MAX)];
+      int nn = 0;
+      for (int sgi = 0; sgi < nseg; sgi++) {
+        double sax = ax + ts[2 * sgi] * (bx - ax);
+        double say = ay + ts[2 * sgi] * (by - ay);
+        double sbx = ax + ts[2 * sgi + 1] * (bx - ax);
+        double sby = ay + ts[2 * sgi + 1] * (by - ay);
+        if (convex) {
+          double lax = sax, lay = say, lbx = sbx, lby = sby;
+          if (clip_line_ring(d, rgx, rgy, rgn, &lax, &lay, &lbx, &lby)) {
+            /* recover ts relative to the original segment */
+            double denom = (fabs(bx - ax) > fabs(by - ay))
+                             ? (bx - ax) : (by - ay);
+            double base = (fabs(bx - ax) > fabs(by - ay)) ? ax : ay;
+            double va = (fabs(bx - ax) > fabs(by - ay)) ? lax : lay;
+            double vb = (fabs(bx - ax) > fabs(by - ay)) ? lbx : lby;
+            if (denom != 0.0 && nn < 2 + CLIP_RING_MAX) {
+              nts[2 * nn] = (va - base) / denom;
+              nts[2 * nn + 1] = (vb - base) / denom;
+              nn++;
+            }
+          }
+        } else {
+          double sub[2 * (2 + CLIP_RING_MAX)];
+          int k = clip_segment_ring_any(rgx, rgy, rgn, sax, say, sbx, sby, sub);
+          for (int q = 0; q < k && nn < 2 + CLIP_RING_MAX; q++) {
+            double span = ts[2 * sgi + 1] - ts[2 * sgi];
+            nts[2 * nn] = ts[2 * sgi] + sub[2 * q] * span;
+            nts[2 * nn + 1] = ts[2 * sgi] + sub[2 * q + 1] * span;
+            nn++;
+          }
+        }
+      }
+      nseg = nn;
+      memcpy(ts, nts, sizeof(double) * 2 * (size_t) nn);
+      if (nseg == 0) break;
+    }
+    if (nseg == 0) {
       if (m >= 2) emit_polyline_shape(d, rx, ry, m, gc);
-      rx[0] = ax; ry[0] = ay; rx[1] = bx; ry[1] = by;
-      m = 2;
+      m = 0;
+      continue;
+    }
+    for (int sgi = 0; sgi < nseg; sgi++) {
+      double sax = ax + ts[2 * sgi] * (bx - ax);
+      double say = ay + ts[2 * sgi] * (by - ay);
+      double sbx = ax + ts[2 * sgi + 1] * (bx - ax);
+      double sby = ay + ts[2 * sgi + 1] * (by - ay);
+      if (m > 0 && fabs(rx[m - 1] - sax) < eps && fabs(ry[m - 1] - say) < eps) {
+        rx[m] = sbx;
+        ry[m] = sby;
+        m++;
+      } else {
+        if (m >= 2) emit_polyline_shape(d, rx, ry, m, gc);
+        rx[0] = sax;
+        ry[0] = say;
+        rx[1] = sbx;
+        ry[1] = sby;
+        m = 2;
+      }
     }
   }
   if (m >= 2) emit_polyline_shape(d, rx, ry, m, gc);
@@ -620,7 +1008,7 @@ static void emit_polygon_shape(xdrDesc *d, const double *x, const double *y,
   xfrm(d, x0, y0, x1, y1);
   points_to_pts(d, x, y, m, x0 * PT_TO_EMU, y0 * PT_TO_EMU,
                 (x1 - x0) * PT_TO_EMU, (y1 - y0) * PT_TO_EMU, TRUE);
-  fill_props_gc(d, gc);
+  fill_props_gc(d, gc, x0, y0, x1, y1);
   if (with_border)
     line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
   else
@@ -635,20 +1023,25 @@ static void emit_polygon_shape(xdrDesc *d, const double *x, const double *y,
 static void emit_clipped_ring(xdrDesc *d, const double *x, const double *y,
                               int n, const pGEcontext gc) {
   if (n < 2) return;
-  double *ox, *oy;
-  int m = dev_clip_polygon(d, x, y, n, &ox, &oy);
-  if (m < 2) return;
+  double *px, *py;
+  int *pn;
+  int np = dev_clip_polygon_multi(d, x, y, n, &px, &py, &pn);
+  if (np < 1) return;
 
-  int cut = (m != n);
+  int cut = (np != 1 || pn[0] != n);
   if (!cut) {
     for (int i = 0; i < n; i++) {
-      if (ox[i] != x[i] || oy[i] != y[i]) { cut = 1; break; }
+      if (px[i] != x[i] || py[i] != y[i]) { cut = 1; break; }
     }
   }
   int has_border = !(gc->col == NA_INTEGER || R_TRANSPARENT(gc->col) ||
                      gc->lty == LTY_BLANK);
 
-  emit_polygon_shape(d, ox, oy, m, gc, has_border && !cut);
+  int off = 0;
+  for (int p = 0; p < np; p++) {
+    emit_polygon_shape(d, px + off, py + off, pn[p], gc, has_border && !cut);
+    off += pn[p];
+  }
 
   if (cut && has_border) {
     double *rx = (double *) R_alloc((size_t) n + 1, sizeof(double));
@@ -659,9 +1052,33 @@ static void emit_clipped_ring(xdrDesc *d, const double *x, const double *y,
   }
 }
 
+static void emit_filled_quad_piece(xdrDesc *d, const double *ox,
+                                   const double *oy, int m, int col) {
+  if (m < 3) return;
+  double x0, y0, x1, y1;
+  bbox(ox, oy, m, &x0, &y0, &x1, &y1);
+  sp_open(d, "");
+  mb_printf(&d->out, "<xdr:spPr>");
+  xfrm(d, x0, y0, x1, y1);
+  points_to_pts(d, ox, oy, m, x0 * PT_TO_EMU, y0 * PT_TO_EMU,
+                (x1 - x0) * PT_TO_EMU, (y1 - y0) * PT_TO_EMU, TRUE);
+  fill_props(d, col);
+  mb_printf(&d->out, "<a:ln><a:noFill/></a:ln>");
+  mb_printf(&d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
+}
+
 static void emit_filled_quad(xdrDesc *d, const double *qx, const double *qy, int col) {
-  double *ox, *oy;
-  int m = dev_clip_polygon(d, qx, qy, 4, &ox, &oy);
+  double *ppx, *ppy;
+  int *ppn;
+  int np = dev_clip_polygon_multi(d, qx, qy, 4, &ppx, &ppy, &ppn);
+  if (np < 1) return;
+  int off = ppn[0];
+  for (int p = 1; p < np; p++) {
+    emit_filled_quad_piece(d, ppx + off, ppy + off, ppn[p], col);
+    off += ppn[p];
+  }
+  double *ox = ppx, *oy = ppy;
+  int m = ppn[0];
   if (m < 3) return;
   double x0, y0, x1, y1;
   bbox(ox, oy, m, &x0, &y0, &x1, &y1);
@@ -816,6 +1233,11 @@ static void Xdr_Size(double *left, double *right, double *bottom, double *top,
  strwidth() to pre-center text before left-aligning it) land visibly
  off. Index 0 covers ASCII space (32) through '~' (126); anything
  outside that range falls back to FALLBACK_CHAR_W. */
+/* Hand-tuned approximate advance widths for a generic sans face, in em.
+ These are original round-number estimates for this package; they are not
+ derived from any font's metric files (compare e.g. Helvetica AFM: H 722,
+ digits 556 - this table uses 750/583). Real metrics come from the
+ optional systemfonts path or a user-supplied table. */
 #define FALLBACK_CHAR_W 0.55
 
 static const double CHAR_W[126 - 32 + 1] = {
@@ -948,7 +1370,7 @@ static void Xdr_Rect(double x0, double y0, double x1, double y1,
   mb_printf(&d->out, "<xdr:spPr>");
   xfrm(d, rx0, ry0, rx1, ry1);
   mb_printf(&d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
-  fill_props_gc(d, gc);
+  fill_props_gc(d, gc, rx0, ry0, rx1, ry1);
   if (cut && has_border) {
     /* clipping cut the rect: don't stroke the edges the clip introduced;
      draw the surviving pieces of the original outline separately */
@@ -989,7 +1411,7 @@ static void Xdr_Circle(double x, double y, double r, const pGEcontext gc, pDevDe
     mb_printf(&d->out, "<xdr:spPr>");
     xfrm(d, x - r, y - r, x + r, y + r);
     mb_printf(&d->out, "<a:prstGeom prst=\"ellipse\"><a:avLst/></a:prstGeom>");
-    fill_props_gc(d, gc);
+    fill_props_gc(d, gc, x - r, y - r, x + r, y + r);
     line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
     mb_printf(&d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
     return;
@@ -1103,8 +1525,21 @@ static void Xdr_Path(double *x, double *y, int npoly, int *nper,
   int idx = 0, any = 0, cut = 0;
   double gx0 = R_PosInf, gy0 = R_PosInf, gx1 = R_NegInf, gy1 = R_NegInf;
   for (int k = 0; k < npoly; k++) {
-    double *ox, *oy;
-    int m = dev_clip_polygon(d, x + idx, y + idx, nper[k], &ox, &oy);
+    double *ppx, *ppy;
+    int *ppn;
+    int npc = dev_clip_polygon_multi(d, x + idx, y + idx, nper[k],
+                                     &ppx, &ppy, &ppn);
+    /* keep only the first piece per input ring in the fixed crx storage;
+     extra pieces are emitted as separate fill-only polygons below */
+    double *ox = ppx, *oy = ppy;
+    int m = (npc >= 1) ? ppn[0] : 0;
+    if (npc > 1) {
+      int off2 = ppn[0];
+      for (int p = 1; p < npc; p++) {
+        emit_polygon_shape(d, ppx + off2, ppy + off2, ppn[p], gc, 0);
+        off2 += ppn[p];
+      }
+    }
     crn[k] = m;
     if (m != nper[k]) cut = 1;
     if (m >= 2) {
@@ -1157,7 +1592,7 @@ static void Xdr_Path(double *x, double *y, int npoly, int *nper,
     mb_printf(&d->out, "<a:close/>");
   }
   mb_printf(&d->out, "</a:path></a:pathLst></a:custGeom>");
-  fill_props_gc(d, gc);
+  fill_props_gc(d, gc, gx0, gy0, gx1, gy1);
   if (has_border && !cut)
     line_props(d, gc->col, gc->lwd, gc->lty, gc->lend, gc->ljoin, gc->lmitre);
   else
@@ -1302,12 +1737,11 @@ static int capture_region(xdrDesc *d, SEXP fn, int kind, int luminance) {
   d->capturing = 0;
   if (err || !d->cap_any) return 0;
 
-  int ok = (!d->cap_fail && d->ring_n >= 3 &&
-            ring_is_convex(d->ring_x, d->ring_y, d->ring_n));
+  int ok = (!d->cap_fail && d->ring_n >= 3);
   if (!ok) {
     Rf_warning(kind == 0
-      ? "easeling: non-convex or multi-ring clip path; clipping to its bounding box"
-      : "easeling: non-convex or multi-ring mask; masking to its bounding box");
+      ? "easeling: multi-ring or oversized clip path; clipping to its bounding box"
+      : "easeling: multi-ring or oversized mask; masking to its bounding box");
     d->ring_x[0] = d->cap_bx0; d->ring_y[0] = d->cap_by0;
     d->ring_x[1] = d->cap_bx1; d->ring_y[1] = d->cap_by0;
     d->ring_x[2] = d->cap_bx1; d->ring_y[2] = d->cap_by1;
@@ -1323,6 +1757,7 @@ static int capture_region(xdrDesc *d, SEXP fn, int kind, int luminance) {
   }
   bbox(d->ring_x, d->ring_y, d->ring_n,
        &d->cap_bx0, &d->cap_by0, &d->cap_bx1, &d->cap_by1);
+  d->ring_convex = ring_is_convex(d->ring_x, d->ring_y, d->ring_n);
   return 1;
 }
 
@@ -1363,8 +1798,11 @@ static SEXP Xdr_SetMask(SEXP path, SEXP ref, pDevDesc dd) {
       d->mask_x[i] = d->ring_x[i];
       d->mask_y[i] = d->ring_y[i];
     }
-    d->mask_bx0 = d->cap_bx0; d->mask_by0 = d->cap_by0;
-    d->mask_bx1 = d->cap_bx1; d->mask_by1 = d->cap_by1;
+    d->mask_bx0 = d->cap_bx0;
+    d->mask_by0 = d->cap_by0;
+    d->mask_bx1 = d->cap_bx1;
+    d->mask_by1 = d->cap_by1;
+    d->mask_convex = d->ring_convex;
     d->mask_shaped = 1;
   } else if (d->mask_soft) {
     Rf_warning("easeling: soft (semi-transparent or gradient) masks cannot be represented; mask ignored");

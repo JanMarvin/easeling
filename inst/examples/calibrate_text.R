@@ -15,7 +15,8 @@ wb <- wb_workbook()$add_worksheet(grid_lines = FALSE)
 
 anchor_row <- 1
 for (v in offsets) {
-  w_in <- 6.5; h_in <- 0.7
+  w_in <- 6.5
+  h_in <- 0.7
   f <- easel_dev(width = w_in, height = h_in, pointsize = ps,
                  fontname = "Calibri", text_voff = v)
   op <- par(mar = rep(0, 4))

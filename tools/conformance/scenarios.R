@@ -20,6 +20,7 @@ scenarios <- list(
   # -- grid / GE features --
   list("grid_gradients", function() { grid::grid.rect(gp=grid::gpar(fill=grid::linearGradient(c("steelblue","white")))); grid::grid.circle(r=.25, gp=grid::gpar(fill=grid::radialGradient(c("gold","darkred")))) }, 4, 3),
   list("grid_path_holes", function() { grid::grid.path(x=c(.1,.9,.9,.1,.35,.65,.65,.35), y=c(.1,.1,.9,.9,.35,.35,.65,.65), id=rep(1:2,each=4), rule="evenodd", gp=grid::gpar(fill="seagreen", col="black", lwd=2)) }, 4, 4),
+  list("grid_clippath_star", function() { grid::pushViewport(grid::viewport(clip=grid::polygonGrob(x=.5+c(0,.12,.45,.19,.28,0,-.28,-.19,-.45,-.12), y=.5+c(.45,.14,.14,-.06,-.36,-.15,-.36,-.06,.14,.14)))); grid::grid.rect(gp=grid::gpar(fill="orange")); for (yy in seq(.1,.9,.08)) grid::grid.segments(0,yy,1,yy,gp=grid::gpar(col="navy",lwd=2)); grid::popViewport() }, 3, 3),
   list("grid_clippath", function() { grid::pushViewport(grid::viewport(clip=grid::circleGrob(r=.3))); grid::grid.rect(gp=grid::gpar(fill="red")); grid::popViewport() }, 3, 3),
   list("grid_mask_hard", function() { grid::pushViewport(grid::viewport(mask=grid::as.mask(grid::circleGrob(r=.3, gp=grid::gpar(fill="white", col=NA)), type="luminance"))); grid::grid.rect(gp=grid::gpar(fill="red")); grid::popViewport() }, 3, 3),
   list("grid_mask_soft", function() { suppressWarnings({grid::pushViewport(grid::viewport(mask=grid::as.mask(grid::circleGrob(r=.3, gp=grid::gpar(fill=grDevices::adjustcolor("white", .5), col=NA))))); grid::grid.rect(gp=grid::gpar(fill="red")); grid::popViewport()}) }, 3, 3, TRUE),

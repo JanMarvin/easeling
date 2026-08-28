@@ -681,7 +681,8 @@ test_that("XML-illegal control characters are stripped from text", {
 })
 
 test_that("rotated rasterImage emits clipped quads at the right anchor", {
-  w <- 4; h <- 4
+  w <- 4
+  h <- 4
   f <- easel_dev(width = w, height = h)
   plot.new()
   plot.window(c(0, 1), c(0, 1), xaxs = "i", yaxs = "i")
@@ -707,7 +708,8 @@ test_that("fully transparent polyline colour emits no shapes", {
 })
 
 test_that("circle crossing the clip boundary is polygon-approximated and cut", {
-  w <- 4; h <- 3
+  w <- 4
+  h <- 3
   f <- easel_dev(width = w, height = h)
   plot.new()
   clip <- clip_bounds_in()
@@ -765,16 +767,15 @@ test_that("easel_size reads custom widths, heights, and defaults from a wb", {
   wb$set_col_widths(cols = 2, widths = 25)
   wb$set_row_heights(rows = 4:6, heights = 30)
   # openxlsx2 pads stored width (25 -> 25.711) and writes defaultRowHeight=16
-  # derive expectations from the same workbook instead of hardcoding the
-  # default geometry: openxlsx2 versions differ in the sheetFormatPr they
-  # write (baseColWidth="8" vs defaultColWidth="8.88671875")
-  stored <- as.numeric(sub('.*width="([0-9.]+)".*', "\\1",
-                           wb$worksheets[[1]]$cols_attr[1]))
-  b_px <- trunc(stored * 7 + 0.5) + 5
+  # pure internal-consistency invariants: openxlsx2 versions differ both in
+  # the sheetFormatPr defaults they write and in how set_col_widths stores
+  # its <col> entries, so nothing here re-parses workbook XML
+  b_in <- easel_size("B1", wb)[["width"]]         # the customised column
   def_col_in <- easel_size("C1", wb)[["width"]]   # an untouched default col
   def_row_in <- easel_size("A1", wb)[["height"]]  # an untouched default row
+  expect_gt(b_in, def_col_in)                     # the custom width took effect
   sz <- easel_size("B2:F12", wb)
-  expect_equal(unname(sz["width"]), b_px / 96 + 4 * def_col_in)
+  expect_equal(unname(sz["width"]), b_in + 4 * def_col_in)
   expect_equal(unname(sz["height"]), 8 * def_row_in + 3 * round(30 * 4 / 3) / 96)
 })
 
@@ -816,7 +817,10 @@ test_that("easel_size handles hidden and width-less cols, out-of-range and hidde
   ws$cols_attr <- c('<col min="1" max="1" hidden="1" width="10"/>',
                     '<col min="2" max="2" customWidth="1"/>')      # no width
   ra <- ws$sheet_data$row_attr
-  hid <- ra[1, , drop = FALSE]; hid$r <- "2"; hid$ht <- ""; hid$hidden <- "1"
+  hid <- ra[1, , drop = FALSE]
+  hid$r <- "2"
+  hid$ht <- ""
+  hid$hidden <- "1"
   ws$sheet_data$row_attr <- rbind(ra, hid)
   sz <- easel_size("A1:B2", wb)
   # col A hidden -> 0 px; the width-less <col> entry leaves B at the default
@@ -904,7 +908,8 @@ test_that("evenodd grid.path keeps its hole under the nonzero renderer rule", {
     as.numeric(regmatches(p, gregexpr("-?[0-9]+", p))[[1]])
   }))
   ring_area <- function(m) {
-    n <- nrow(m); j <- c(2:n, 1)
+    n <- nrow(m)
+    j <- c(2:n, 1)
     sum(m[, 1] * m[j, 2] - m[j, 1] * m[, 2]) / 2
   }
   n_bg <- nrow(xy) - 8   # any leading pts belong to other shapes (none here)
@@ -964,8 +969,9 @@ test_that("without systemfonts the builtin metric tables are used", {
   text(0.5, 0.5, "gjpqy Aa.x-() Z_;:", adj = c(0.5, 0.5))
   w <- strwidth("Hello", units = "inches")
   dev.off()
-  expect_equal(w * 72, sum(c(0.722, 0.556, 0.222, 0.222, 0.556)) * 12,
-               tolerance = 0.2)   # Helvetica-like table, loose sanity bound
+  # H .750 + e .583 + l .250 + l .250 + o .583 em from the builtin table
+  expect_equal(w * 72, sum(c(0.750, 0.583, 0.250, 0.250, 0.583)) * 12,
+               tolerance = 1e-6)
   expect_true(file.exists(f))
 })
 
@@ -1016,37 +1022,50 @@ test_that("rect and polygon grobs work as clip paths", {
   expect_gte(count_matches(f, "<a:custGeom>"), 1)
 })
 
-test_that("non-convex, multi-ring, and oversized clip paths fall back to bbox", {
+test_that("non-convex clip paths clip exactly via Greiner-Hormann", {
   skip_if_not(getRversion() >= "4.1.0")
-  star <- grid::polygonGrob(
-    x = .5 + c(0, .1, .4, .16, .25, 0, -.25, -.16, -.4, -.1) ,
-    y = .5 + c(.4, .12, .12, -.05, -.32, -.13, -.32, -.05, .12, .12))
+  star_x <- .5 + c(0, .1, .4, .16, .25, 0, -.25, -.16, -.4, -.1)
+  star_y <- .5 + c(.4, .12, .12, -.05, -.32, -.13, -.32, -.05, .12, .12)
   f <- easel_dev(width = 3, height = 3, metrics = FALSE)
   grid::grid.newpage()
-  expect_warning(
-    { grid::pushViewport(grid::viewport(clip = star))
-      grid::grid.rect(gp = grid::gpar(fill = "red", col = NA))
-      grid::popViewport() },
-    "bounding box")
+  grid::pushViewport(grid::viewport(
+    clip = grid::polygonGrob(x = star_x, y = star_y)))
+  grid::grid.rect(gp = grid::gpar(fill = "red", col = NA))
+  grid::grid.segments(0, 0.3, 1, 0.3, gp = grid::gpar(col = "black"))  # crosses both lower arms
+  grid::popViewport()
   dev.off()
+  txt <- read_xml_text(f)
+  expect_gte(count_matches(f, "<a:custGeom>"), 2)
+  bb <- data_shape_bboxes(f, 3, 3)
+  tol <- 1e-3
+  expect_lte(max(bb$x1), 3 * max(star_x) + tol)
+  expect_gte(min(bb$x0), 3 * min(star_x) - tol)
+  # a horizontal line through the lower arms splits into two pieces
+  hseg <- regmatches(txt, gregexpr('<a:ext cx="[0-9]+" cy="0"', txt))[[1]]
+  expect_gte(length(hseg), 2)
+})
 
+test_that("multi-ring and oversized clip paths fall back to bbox", {
+  skip_if_not(getRversion() >= "4.1.0")
   two <- grid::grobTree(grid::circleGrob(x = .3, r = .1),
                         grid::circleGrob(x = .7, r = .1))
   f <- easel_dev(width = 3, height = 3, metrics = FALSE)
   grid::grid.newpage()
   expect_warning(
-    { grid::pushViewport(grid::viewport(clip = two))
+    {
+      grid::pushViewport(grid::viewport(clip = two))
       grid::grid.rect(gp = grid::gpar(fill = "red", col = NA))
       grid::popViewport() },
     "bounding box")
   dev.off()
 
-  big <- grid::polygonGrob(x = .5 + .4 * cos(seq(0, 2*pi, length.out = 200)),
-                           y = .5 + .4 * sin(seq(0, 2*pi, length.out = 200)))
+  big <- grid::polygonGrob(x = .5 + .4 * cos(seq(0, 2 * pi, length.out = 200)),
+                           y = .5 + .4 * sin(seq(0, 2 * pi, length.out = 200)))
   f <- easel_dev(width = 3, height = 3, metrics = FALSE)
   grid::grid.newpage()
   expect_warning(
-    { grid::pushViewport(grid::viewport(clip = big))
+    {
+      grid::pushViewport(grid::viewport(clip = big))
       grid::grid.rect(gp = grid::gpar(fill = "red", col = NA))
       grid::popViewport() },
     "bounding box")
@@ -1063,7 +1082,7 @@ test_that("empty or erroring clip grobs leave the device usable", {
   dev.off()
   expect_gte(count_matches(f, "<xdr:sp "), 1)
 
-  assign("drawDetails.easelboom", function(x, recording) stop("boom"),
+  assign("drawDetails.easelboom", function(x, recording) stop("boom"),  # nolint: object_name_linter.
          envir = globalenv())
   on.exit(rm("drawDetails.easelboom", envir = globalenv()), add = TRUE)
   f <- easel_dev(width = 3, height = 3, metrics = FALSE)
@@ -1188,4 +1207,106 @@ test_that("easel_size parses both sheetFormatPr shapes openxlsx2 has written", {
   ws$sheetFormatPr <- '<sheetFormatPr baseColWidth="8" defaultRowHeight="16"/>'
   expect_equal(unname(easel_size("A1", wb)),
                c(trunc(8.43 * 7 + 0.5) + 5, round(16 * 4 / 3)) / 96)        # 64 x 21 px
+})
+
+test_that("radial gradient focus follows R's start-circle centre", {
+  skip_if_not(getRversion() >= "4.1.0")
+  f <- easel_dev(width = 4, height = 4)
+  grid::grid.rect(gp = grid::gpar(fill = grid::radialGradient(
+    colours = c("gold", "darkred"),
+    cx1 = 0.25, cy1 = 0.25, r1 = 0,
+    cx2 = 0.25, cy2 = 0.25, r2 = 0.5
+  )))
+  dev.off()
+  txt <- read_xml_text(f)
+  m <- regmatches(txt, regexpr(
+    '<a:fillToRect l="([0-9]+)" t="([0-9]+)" r="([0-9]+)" b="([0-9]+)"/>', txt))
+  v <- as.numeric(regmatches(m, gregexpr("[0-9]+", m))[[1]])
+  # cx1 = 0.25 npc from left; grid y up vs device y down -> t = 75%
+  expect_equal(v[1], 25000, tolerance = 0.02)
+  expect_equal(v[2], 75000, tolerance = 0.02)
+  expect_equal(v[1] + v[3], 100000)
+  expect_equal(v[2] + v[4], 100000)
+})
+
+test_that("Greiner-Hormann containment and disjoint cases", {
+  skip_if_not(getRversion() >= "4.1.0")
+  star_x <- .5 + c(0, .1, .4, .16, .25, 0, -.25, -.16, -.4, -.1)
+  star_y <- .5 + c(.4, .12, .12, -.05, -.32, -.13, -.32, -.05, .12, .12)
+  in_star_clip <- function(code) {
+    f <- easel_dev(width = 3, height = 3, metrics = FALSE)
+    grid::grid.newpage()
+    grid::pushViewport(grid::viewport(
+      clip = grid::polygonGrob(x = star_x, y = star_y)))
+    code()
+    grid::popViewport()
+    dev.off()
+    f
+  }
+  # subject fully inside the star: kept whole
+  f <- in_star_clip(function() {
+    grid::grid.rect(
+      x = .5, y = .55, width = .1, height = .1,
+      gp = grid::gpar(fill = "red", col = NA))
+  })
+  expect_equal(count_matches(f, "<xdr:sp "), 1)
+  # subject fully outside (in the notch below the star's waist, off-arm)
+  f <- in_star_clip(function() {
+    grid::grid.rect(
+      x = .5, y = .12, width = .06, height = .06,
+      gp = grid::gpar(fill = "red", col = NA))
+  })
+  expect_equal(count_matches(f, "<xdr:sp "), 0)
+  # wide band across both lower arms: two fill pieces
+  f <- in_star_clip(function() {
+    grid::grid.rect(
+      x = .5, y = .28, width = 1, height = .08,
+      gp = grid::gpar(fill = "red", col = NA))
+  })
+  expect_gte(count_matches(f, "<a:custGeom>"), 2)
+})
+
+test_that("non-convex hard masks clip via Greiner-Hormann too", {
+  skip_if_not(getRversion() >= "4.2.0")
+  star_x <- .5 + c(0, .1, .4, .16, .25, 0, -.25, -.16, -.4, -.1)
+  star_y <- .5 + c(.4, .12, .12, -.05, -.32, -.13, -.32, -.05, .12, .12)
+  f <- easel_dev(width = 3, height = 3, metrics = FALSE)
+  grid::grid.newpage()
+  grid::pushViewport(grid::viewport(mask = grid::as.mask(
+    grid::polygonGrob(x = star_x, y = star_y,
+                      gp = grid::gpar(fill = "white", col = NA)),
+    type = "luminance")))
+  grid::grid.rect(gp = grid::gpar(fill = "red", col = NA))
+  grid::grid.segments(0, 0.3, 1, 0.3, gp = grid::gpar(col = "black"))
+  grid::popViewport()
+  dev.off()
+  txt <- read_xml_text(f)
+  bb <- data_shape_bboxes(f, 3, 3)
+  expect_lte(max(bb$x1), 3 * max(star_x) + 1e-3)
+  hseg <- regmatches(txt, gregexpr('<a:ext cx="[0-9]+" cy="0"', txt))[[1]]
+  expect_gte(length(hseg), 2)
+})
+
+test_that("paths and rotated rasters split into pieces under a star clip", {
+  skip_if_not(getRversion() >= "4.1.0")
+  star_x <- .5 + c(0, .1, .4, .16, .25, 0, -.25, -.16, -.4, -.1)
+  star_y <- .5 + c(.4, .12, .12, -.05, -.32, -.13, -.32, -.05, .12, .12)
+  f <- easel_dev(width = 3, height = 3, metrics = FALSE)
+  grid::grid.newpage()
+  grid::pushViewport(grid::viewport(
+    clip = grid::polygonGrob(x = star_x, y = star_y)))
+  grid::grid.path(x = c(.05, .95, .95, .05, .3, .7, .7, .3),
+                  y = c(.24, .24, .34, .34, .27, .27, .31, .31),
+                  id = rep(1:2, each = 4), rule = "evenodd",
+                  gp = grid::gpar(fill = "seagreen", col = NA))
+  grid::grid.raster(as.raster(matrix(c("red", "blue"), 1)),
+                    y = .28, height = .07, interpolate = FALSE)
+  # rotated raster: a single quad band across both arms -> two pieces
+  grid::pushViewport(grid::viewport(angle = 3))
+  grid::grid.raster(as.raster(matrix("purple")), y = .28, height = .05,
+                    width = .9, interpolate = FALSE)
+  grid::popViewport()
+  grid::popViewport()
+  dev.off()
+  expect_gte(count_matches(f, "<a:custGeom>"), 3)
 })
