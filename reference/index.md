@@ -8,3 +8,5 @@
   spreadsheet cell region
 - [`easel_xml()`](easel_xml.md) : Render plotting code straight to a
   DrawingML string
+- [`font_match()`](font_match.md) : Which font is actually measured for
+  a typeface

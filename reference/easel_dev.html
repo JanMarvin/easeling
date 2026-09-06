@@ -11,7 +11,7 @@ dependency on Cairo, FreeType, fontconfig, or xml2."></head><body>
 
     <a class="navbar-brand me-2" href="../index.html">easeling</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.3.0</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.3.1</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -33,7 +33,7 @@ dependency on Cairo, FreeType, fontconfig, or xml2."></head><body>
   <main id="main" class="col-md-9"><div class="page-header">
 
       <h1>Open a DrawingML graphics device for openxlsx2</h1>
-      <small class="dont-index">Source: <a href="https://github.com/JanMarvin/easeling/blob/0.3.0/R/easel_dev.R" class="external-link"><code>R/easel_dev.R</code></a></small>
+      <small class="dont-index">Source: <a href="https://github.com/JanMarvin/easeling/blob/main/R/easel_dev.R" class="external-link"><code>R/easel_dev.R</code></a></small>
       <div class="d-none name"><code>easel_dev.Rd</code></div>
     </div>
 
@@ -122,15 +122,23 @@ layout places it visibly off; see
 
 <dt id="arg-metrics">metrics<a class="anchor" aria-label="anchor" href="#arg-metrics"></a></dt>
 <dd><p>Font metrics used for text layout (string widths,
-vertical centring, margins). `NULL` (default): use real metrics for
-`fontname` via the `systemfonts` package when it is installed,
-otherwise the built-in Calibri-like table. `FALSE`: always use the
-built-in table. Or a list with numeric components `widths`,
-`ascents`, `descents`, each of length 95 giving em fractions for the
-ASCII characters 32..126. Metrics only affect what R computes -
-rendering is always done by the spreadsheet application with the real
-font - but better metrics mean legend boxes, margins, and centring
-are sized for the text that will actually appear.</p></dd>
+  vertical centring, margins). `NULL` (default): use real metrics for
+  `fontname` via the `systemfonts` package when it is installed,
+  otherwise the built-in Calibri-like table. `FALSE`: always use the
+  built-in table. Or a list with numeric components `widths`,
+  `ascents`, `descents`, each of length 95 giving em fractions for the
+  ASCII characters 32..126. Metrics only affect what R computes -
+  rendering is always done by the spreadsheet application with the real
+  font - but better metrics mean legend boxes, margins, and centring
+  are sized for the text that will actually appear.</p>
+<p>The machine writing the file need not have the font it will be opened
+  with, and `systemfonts` substitutes without saying so; [font_match()]
+  reports which font was measured. To get real metrics for a font this
+  machine lacks, install a replacement built to match it (Carlito for
+  Calibri, Liberation Sans for Arial, Liberation Serif for Times New
+  Roman), point `systemfonts` at the actual file with
+  `systemfonts::register_font("Calibri", plain = "calibri.ttf")` before
+  opening the device, or pass the numbers in `metrics` yourself.</p></dd>
 
 </dl></div>
     <div class="section level2">
@@ -143,7 +151,7 @@ are sized for the text that will actually appear.</p></dd>
     <div class="sourceCode"><pre class="sourceCode r"><code><span class="r-in"><span><span class="va">f</span> <span class="op">&lt;-</span> <span class="fu">easel_dev</span><span class="op">(</span>width <span class="op">=</span> <span class="fl">6</span>, height <span class="op">=</span> <span class="fl">4</span>, fontname <span class="op">=</span> <span class="st">"Georgia"</span><span class="op">)</span></span></span>
 <span class="r-in"><span><span class="fu"><a href="https://rdrr.io/r/graphics/plot.default.html" class="external-link">plot</a></span><span class="op">(</span><span class="fl">1</span><span class="op">:</span><span class="fl">10</span>, <span class="op">(</span><span class="fl">1</span><span class="op">:</span><span class="fl">10</span><span class="op">)</span><span class="op">^</span><span class="fl">2</span>, type <span class="op">=</span> <span class="st">"b"</span><span class="op">)</span></span></span>
 <span class="r-in"><span><span class="fu"><a href="https://rdrr.io/r/grDevices/dev.html" class="external-link">dev.off</a></span><span class="op">(</span><span class="op">)</span></span></span>
-<span class="r-out co"><span class="r-pr">#&gt;</span> agg_record_1a10764626fc </span>
+<span class="r-out co"><span class="r-pr">#&gt;</span> agg_record_19df530b1038 </span>
 <span class="r-out co"><span class="r-pr">#&gt;</span>                       2 </span>
 </code></pre></div>
     </div>

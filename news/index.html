@@ -7,7 +7,7 @@
 
     <a class="navbar-brand me-2" href="../index.html">easeling</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.3.0</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.3.1</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -29,9 +29,17 @@
   <main id="main" class="col-md-9"><div class="page-header">
 
       <h1>Changelog</h1>
-      <small>Source: <a href="https://github.com/JanMarvin/easeling/blob/0.3.0/NEWS.md" class="external-link"><code>NEWS.md</code></a></small>
+      <small>Source: <a href="https://github.com/JanMarvin/easeling/blob/main/NEWS.md" class="external-link"><code>NEWS.md</code></a></small>
     </div>
 
+    <div class="section level2">
+<h2 class="pkg-version" data-toc-text="0.3.1" id="easeling-031">easeling 0.3.1<a class="anchor" aria-label="anchor" href="#easeling-031"></a></h2>
+<ul><li>Words drawn as separate calls on one baseline now end up in a single shape, one run per word. gridtext, and through it ggtext, lays out marked-up titles that way, and every word used to become its own box sized by our estimate of its width.</li>
+<li>Super- and subscripts stay on the line as shifted runs instead of breaking it into separate shapes.</li>
+<li>Glyphs (R &gt;= 4.3) keep the positions the graphics engine gave them and are never merged.</li>
+<li>Nothing is drawn outside the canvas any more. Clip rectangles are intersected with the device, which <code>xpd = NA</code> can otherwise exceed, and raster cells are clipped one by one instead of only as a whole image.</li>
+<li>New <code><a href="../reference/font_match.html">font_match()</a></code> reports which font was really measured. Writing a drawing on a machine that lacks the font it will be opened with is normal, and <code>systemfonts</code> substitutes without saying so.</li>
+</ul></div>
     <div class="section level2">
 <h2 class="pkg-version" data-toc-text="0.3.0" id="easeling-030">easeling 0.3.0<a class="anchor" aria-label="anchor" href="#easeling-030"></a></h2>
 <ul><li>
@@ -46,7 +54,8 @@
 <li>Glyph API support (R &gt;= 4.3, e.g. ‘marquee’ typeset text) via an optional ‘systemfonts’ glyph-to-character mapping.</li>
 <li>Exact <code>custDash</code> patterns for all line types; evenodd paths keep their holes; runs on R &gt;= 3.6 with all newer graphics API behind version guards.</li>
 </ul></div>
-  </main></div>
+  </main><aside class="col-md-3"><nav id="toc" aria-label="Table of contents"><h2>On this page</h2>
+    </nav></aside></div>
 
 
     <footer><div class="pkgdown-footer-left">

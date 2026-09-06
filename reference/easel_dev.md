@@ -92,6 +92,16 @@ easel_dev(
   better metrics mean legend boxes, margins, and centring are sized for
   the text that will actually appear.
 
+  The machine writing the file need not have the font it will be opened
+  with, and \`systemfonts\` substitutes without saying so;
+  \[font_match()\] reports which font was measured. To get real metrics
+  for a font this machine lacks, install a replacement built to match it
+  (Carlito for Calibri, Liberation Sans for Arial, Liberation Serif for
+  Times New Roman), point \`systemfonts\` at the actual file with
+  \`systemfonts::register_font("Calibri", plain = "calibri.ttf")\`
+  before opening the device, or pass the numbers in \`metrics\`
+  yourself.
+
 ## Value
 
 The output file path, invisibly.
@@ -102,6 +112,6 @@ The output file path, invisibly.
 f <- easel_dev(width = 6, height = 4, fontname = "Georgia")
 plot(1:10, (1:10)^2, type = "b")
 dev.off()
-#> agg_record_1a10764626fc 
+#> agg_record_19df530b1038 
 #>                       2 
 ```
