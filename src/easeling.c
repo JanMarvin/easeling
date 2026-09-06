@@ -50,6 +50,20 @@ static void mb_printf(membuf *b, const char *fmt, ...) {
   b->len += (size_t) n;
 }
 
+/* One text() call held back for coalescing. gridtext (ggtext) lays a line
+ out itself and issues one call per word, so without this every word
+ becomes its own shape, sized by our estimated width and re-laid out
+ independently by the spreadsheet application. Runs that share a
+ baseline and sit adjacent are emitted as a:r siblings in one a:p, which
+ leaves the intra-line spacing to the renderer and its real font. */
+#define TXT_MAX_RUNS 64
+
+typedef struct {
+  char *t;               /* escaped text, malloc'd, with any gap spaces */
+  double x, w, fs, dy;   /* dy: baseline raised above the line's, > 0 = super */
+  int col, face;
+} txt_run;
+
 typedef struct {
   membuf out;
   char *path;      /* NULL: return the drawing as a string via result_env */
@@ -80,7 +94,13 @@ typedef struct {
   double text_voff;
   Rboolean underline;
   Rboolean strikeout;
+  txt_run txt[TXT_MAX_RUNS];
+  int ntxt;
+  double txt_y, txt_rot, txt_hadj, txt_fs;
+  char txt_font[201];
 } xdrDesc;
+
+static void text_flush(pDevDesc dd);
 
 static int is_generic_family(const char *f) {
   return f[0] == '\0' || strcmp(f, "sans") == 0 || strcmp(f, "serif") == 0 ||
@@ -1104,6 +1124,7 @@ static void Xdr_Raster(unsigned int *raster, int w, int h,
                        double x, double y, double width, double height,
                        double rot, Rboolean interpolate,
                        const pGEcontext gc, pDevDesc dd) {
+  text_flush(dd);
   (void) interpolate; (void) gc;
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   if (d->capturing || w <= 0 || h <= 0) return;
@@ -1147,6 +1168,15 @@ static void Xdr_Raster(unsigned int *raster, int w, int h,
           if (j + 1 < h)   ry1 += cell_h * 0.5;
         }
         if (!rotated) {
+          double cx0 = fmin(d->clip_x0, d->clip_x1);
+          double cx1 = fmax(d->clip_x0, d->clip_x1);
+          double cy0 = fmin(d->clip_y0, d->clip_y1);
+          double cy1 = fmax(d->clip_y0, d->clip_y1);
+          if (rx0 < cx0) rx0 = cx0;
+          if (rx1 > cx1) rx1 = cx1;
+          if (ry0 < cy0) ry0 = cy0;
+          if (ry1 > cy1) ry1 = cy1;
+          if (rx1 <= rx0 || ry1 <= ry0) { i += run; continue; }
           sp_open(d, "");
           mb_printf(&d->out, "<xdr:spPr>");
           xfrm(d, rx0, ry0, rx1, ry1);
@@ -1176,6 +1206,7 @@ static void Xdr_Deactivate(pDevDesc dd) { (void) dd; }
 static void Xdr_Mode(int mode, pDevDesc dd) { (void) mode; (void) dd; }
 
 static void Xdr_NewPage(const pGEcontext gc, pDevDesc dd) {
+  text_flush(dd);
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   d->clip_shaped = 0;
   d->mask_shaped = 0;
@@ -1194,6 +1225,7 @@ static void Xdr_NewPage(const pGEcontext gc, pDevDesc dd) {
 }
 
 static void Xdr_Close(pDevDesc dd) {
+  text_flush(dd);
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
 
   mb_printf(&d->out, "</xdr:grpSp><xdr:clientData/></xdr:absoluteAnchor></xdr:wsDr>");
@@ -1222,11 +1254,18 @@ static void Xdr_Close(pDevDesc dd) {
 
 static void Xdr_Clip(double x0, double x1, double y0, double y1, pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  if (x0 != d->clip_x0 || x1 != d->clip_x1 ||
+      y0 != d->clip_y0 || y1 != d->clip_y1) text_flush(dd);
   /* a rect clip is a full clip reset; the engine re-issues setClipPath
    afterwards when a path clip is still meant to apply (cairo protocol) */
   d->clip_shaped = 0;
-  d->clip_x0 = x0; d->clip_x1 = x1;
-  d->clip_y0 = y0; d->clip_y1 = y1;
+  /* the engine hands out clip rects larger than the device (xpd = NA sets
+   one), so intersect with the canvas here: everything downstream clips
+   against d->clip_*, which keeps ink inside the group's frame */
+  d->clip_x0 = fmax(fmin(x0, x1), 0.0);
+  d->clip_x1 = fmin(fmax(x0, x1), dd->right);
+  d->clip_y0 = fmax(fmin(y0, y1), 0.0);
+  d->clip_y1 = fmin(fmax(y0, y1), dd->bottom);
 }
 
 static void Xdr_Size(double *left, double *right, double *bottom, double *top,
@@ -1339,6 +1378,7 @@ static void Xdr_MetricInfo(int c, const pGEcontext gc, double *ascent,
 
 static void Xdr_Line(double x1, double y1, double x2, double y2,
                      const pGEcontext gc, pDevDesc dd) {
+  text_flush(dd);
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   if (d->capturing) return;
   double px[2] = {x1, x2};
@@ -1348,6 +1388,7 @@ static void Xdr_Line(double x1, double y1, double x2, double y2,
 
 static void Xdr_Rect(double x0, double y0, double x1, double y1,
                      const pGEcontext gc, pDevDesc dd) {
+  text_flush(dd);
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   if (d->capturing) {
     if (capture_visible(d, gc)) {
@@ -1397,6 +1438,7 @@ static void Xdr_Rect(double x0, double y0, double x1, double y1,
 }
 
 static void Xdr_Circle(double x, double y, double r, const pGEcontext gc, pDevDesc dd) {
+  text_flush(dd);
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   if (d->capturing) {
     if (capture_visible(d, gc)) {
@@ -1440,12 +1482,14 @@ static void Xdr_Circle(double x, double y, double r, const pGEcontext gc, pDevDe
 }
 
 static void Xdr_Polyline(int n, double *x, double *y, const pGEcontext gc, pDevDesc dd) {
+  text_flush(dd);
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   if (d->capturing) return;
   emit_clipped_polyline(d, x, y, n, gc);
 }
 
 static void Xdr_Polygon(int n, double *x, double *y, const pGEcontext gc, pDevDesc dd) {
+  text_flush(dd);
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   if (d->capturing) {
     if (capture_visible(d, gc)) capture_ring(d, x, y, n);
@@ -1475,6 +1519,7 @@ static int point_in_ring(double px, double py, const double *x, const double *y,
 
 static void Xdr_Path(double *x, double *y, int npoly, int *nper,
                      Rboolean winding, const pGEcontext gc, pDevDesc dd) {
+  text_flush(dd);
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   if (npoly < 1) return;
   if (d->capturing) {
@@ -1622,17 +1667,67 @@ static void Xdr_Path(double *x, double *y, int npoly, int *nper,
   }
 }
 
-static void Xdr_TextImpl(double x, double y, const char *str, double rot,
-                         double hadj, const pGEcontext gc, pDevDesc dd) {
+/* -1 unless the next run starts exactly where our own metrics would have
+ put it, either butted against the previous run or one space along. A
+ caller that laid the line out with this device's strWidth (gridtext)
+ lands on 0.000 or 1.000; anything else is a different string that
+ happens to be nearby, and is left alone. */
+static int text_gap_spaces(const xdrDesc *d, double x) {
+  const txt_run *p = &d->txt[d->ntxt - 1];
+  /* the line's own size, not the previous run's: a space after a
+   superscript is still a full-size space */
+  double sp = dev_char_w(d, ' ') * d->txt_fs;
+  if (!(sp > 0.0)) return -1;
+  double gap = (x - (p->x + p->w)) / sp;
+  if (fabs(gap) < 0.15) return 0;
+  if (fabs(gap - 1.0) < 0.15) return 1;
+  return -1;
+}
+
+/* A run that is smaller and sits off the line's baseline is a super- or
+ subscript (gridtext emits <sup>/<sub> that way: 0.8x size, a quarter em
+ clear of the baseline, butted against the run before it). Anything
+ further off is a different line of text and is left alone. */
+static int text_is_script(const xdrDesc *d, double y, double fs) {
+  double ratio = fs / d->txt_fs;
+  if (ratio < 0.5 || ratio > 0.9) return 0;
+  double dy = fabs(d->txt_y - y) / d->txt_fs;
+  return dy > 0.08 && dy < 0.6;
+}
+
+static int text_continues(const xdrDesc *d, double x, double y, double rot,
+                          double hadj, double fs, const char *font) {
+  if (d->ntxt == 0 || d->ntxt >= TXT_MAX_RUNS) return 0;
+  if (fabs(hadj) > 1e-6 || fabs(d->txt_hadj) > 1e-6) return 0;
+  if (fabs(rot - d->txt_rot) > 1e-4) return 0;
+  if (strcmp(font, d->txt_font) != 0) return 0;
+  int on_line = (fabs(y - d->txt_y) <= 1e-6 && fabs(fs - d->txt_fs) <= 1e-6);
+  if (!on_line && !text_is_script(d, y, fs)) return 0;
+  int gap = text_gap_spaces(d, x);
+  /* a script never carries a space of its own */
+  return on_line ? gap >= 0 : gap == 0;
+}
+
+static void text_flush(pDevDesc dd) {
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
-  if (d->capturing) return;
-  if (str == NULL || str[0] == '\0') return;
-  size_t buflen = strlen(str) * 6 + 1;
-  char *buf = R_alloc(buflen, 1);
-  esc_xml(str, buf, buflen);
-  double fs = gc->cex * gc->ps;
-  double w = Xdr_StrWidth(str, gc, dd);
-  double h = fs * 1.2;
+  /* a clip/mask capture replays a grob through the draw callbacks without
+   emitting anything; holding the buffer back keeps output order intact */
+  if (d->ntxt == 0 || d->capturing) return;
+  int n = d->ntxt;
+  d->ntxt = 0;
+
+  const txt_run *first = &d->txt[0];
+  const txt_run *last = &d->txt[n - 1];
+  double fs = d->txt_fs;
+  double rise = 0.0;
+  for (int i = 0; i < n; i++)
+    if (fabs(d->txt[i].dy) > rise) rise = fabs(d->txt[i].dy);
+
+  double rot = d->txt_rot, hadj = d->txt_hadj;
+  double x = first->x, y = d->txt_y;
+  double w = last->x + last->w - first->x;
+  double h = fs * 1.2 + 2.0 * rise;   /* grown symmetrically: the base
+                                       baseline stays put */
   /* Text is centred in its box (anchor="ctr"), so the box centre must sit
    at the visual centre of the line: baseline - (ascent - descent)/2.
    With the device metrics (0.75/0.25 em) that is 0.25em above the
@@ -1672,49 +1767,101 @@ static void Xdr_TextImpl(double x, double y, const char *str, double rot,
       if (bx0 < 0.0 && bx1 > 0.0) bx0 = 0.0;
     }
   }
-  if (fully_outside_clip(d, bx0, by0, bx1, by1)) return;
 
-  sp_open(d, "");
-  mb_printf(&d->out, "<xdr:spPr>");
+  if (!fully_outside_clip(d, bx0, by0, bx1, by1)) {
+    const char *u_attr = d->underline ? " u=\"sng\"" : "";
+    const char *strike_attr = d->strikeout ? " strike=\"sngStrike\"" : "";
+    const char *algn = (hadj < 0.25) ? "l" : (hadj > 0.75) ? "r" : "ctr";
+    char fbuf[1301];
+    esc_xml(d->txt_font, fbuf, sizeof(fbuf));
 
-  xfrm(d, bx0, by0, bx1, by1);
+    sp_open(d, "");
+    mb_printf(&d->out, "<xdr:spPr>");
+    xfrm(d, bx0, by0, bx1, by1);
+    mb_printf(&d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/>"
+              "<a:ln><a:noFill/></a:ln></xdr:spPr>");
 
-  mb_printf(&d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/>"
-            "<a:ln><a:noFill/></a:ln></xdr:spPr>");
+    if (fabs(rot) > 1e-4) {
+      int ooxml_rot = (int) (-rot * 60000.0);
+      mb_printf(&d->out, "<xdr:txBody><a:bodyPr rot=\"%d\" vert=\"horz\" anchor=\"ctr\" wrap=\"none\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/>", ooxml_rot);
+    } else {
+      mb_printf(&d->out, "<xdr:txBody><a:bodyPr anchor=\"ctr\" wrap=\"none\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/>");
+    }
 
-  if (fabs(rot) > 1e-4) {
-    int ooxml_rot = (int) (-rot * 60000.0);
-    mb_printf(&d->out, "<xdr:txBody><a:bodyPr rot=\"%d\" vert=\"horz\" anchor=\"ctr\" wrap=\"none\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/>", ooxml_rot);
-  } else {
-    mb_printf(&d->out, "<xdr:txBody><a:bodyPr anchor=\"ctr\" wrap=\"none\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/>");
+    mb_printf(&d->out, "<a:p><a:pPr algn=\"%s\"/>", algn);
+    for (int i = 0; i < n; i++) {
+      const txt_run *r = &d->txt[i];
+      const char *b_attr = (r->face == 2 || r->face == 4) ? " b=\"1\"" : "";
+      const char *i_attr = (r->face == 3 || r->face == 4) ? " i=\"1\"" : "";
+      int sz = (int) lround(r->fs * 100.0);
+      if (sz < 100) sz = 100;
+      char rise_attr[32];
+      rise_attr[0] = '\0';
+      if (fabs(r->dy) > 1e-6)
+        snprintf(rise_attr, sizeof(rise_attr), " baseline=\"%d\"",
+                 (int) lround(r->dy / r->fs * 100000.0));
+      mb_printf(&d->out, "<a:r><a:rPr sz=\"%d\"%s%s%s%s%s><a:solidFill>",
+                sz, b_attr, i_attr, u_attr, strike_attr, rise_attr);
+      srgb_clr(&d->out, r->col);
+      mb_printf(&d->out,
+                "</a:solidFill><a:latin typeface=\"%s\"/><a:cs typeface=\"%s\"/></a:rPr>"
+                "<a:t>%s</a:t></a:r>", fbuf, fbuf, r->t);
+    }
+    mb_printf(&d->out, "</a:p></xdr:txBody></xdr:sp>\n");
   }
 
-  const char *b_attr = (gc->fontface == 2 || gc->fontface == 4) ? " b=\"1\"" : "";
-  const char *i_attr = (gc->fontface == 3 || gc->fontface == 4) ? " i=\"1\"" : "";
-  const char *u_attr = d->underline ? " u=\"sng\"" : "";
-  const char *strike_attr = d->strikeout ? " strike=\"sngStrike\"" : "";
+  for (int i = 0; i < n; i++) {
+    free(d->txt[i].t);
+    d->txt[i].t = NULL;
+  }
+}
 
-  const char *algn = (hadj < 0.25) ? "l" : (hadj > 0.75) ? "r" : "ctr";
+static void Xdr_TextImpl(double x, double y, const char *str, double rot,
+                         double hadj, const pGEcontext gc, pDevDesc dd,
+                         int coalesce) {
+  xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
+  if (d->capturing) return;
+  if (str == NULL || str[0] == '\0') return;
+
   const char *font = is_generic_family(gc->fontfamily) ? d->fontname : gc->fontfamily;
-  char fbuf[1301];
-  esc_xml(font, fbuf, sizeof(fbuf));
+  double fs = gc->cex * gc->ps;
+  double w = Xdr_StrWidth(str, gc, dd);
 
-  int sz = (int) lround(fs * 100.0);
-  if (sz < 100) sz = 100;
+  int gap = 0;
+  if (coalesce && text_continues(d, x, y, rot, hadj, fs, font)) {
+    gap = text_gap_spaces(d, x);
+  } else {
+    text_flush(dd);
+    d->txt_y = y;
+    d->txt_rot = rot;
+    d->txt_hadj = hadj;
+    d->txt_fs = fs;
+    strncpy(d->txt_font, font, sizeof(d->txt_font) - 1);
+    d->txt_font[sizeof(d->txt_font) - 1] = '\0';
+  }
 
-  mb_printf(&d->out,
-          "<a:p><a:pPr algn=\"%s\"/><a:r><a:rPr sz=\"%d\"%s%s%s%s><a:solidFill>",
-          algn, sz, b_attr, i_attr, u_attr, strike_attr);
-  srgb_clr(&d->out, gc->col);
-  mb_printf(&d->out,
-          "</a:solidFill><a:latin typeface=\"%s\"/><a:cs typeface=\"%s\"/></a:rPr>"
-          "<a:t>%s</a:t></a:r></a:p></xdr:txBody></xdr:sp>\n",
-          fbuf, fbuf, buf);
+  size_t buflen = strlen(str) * 6 + (size_t) gap + 1;
+  char *t = (char *) malloc(buflen);
+  if (t == NULL) {
+    text_flush(dd);
+    Rf_error("easeling: out of memory buffering text");
+  }
+  for (int i = 0; i < gap; i++) t[i] = ' ';
+  esc_xml(str, t + gap, buflen - (size_t) gap);
+
+  txt_run *r = &d->txt[d->ntxt++];
+  r->t = t;
+  r->x = x;
+  r->w = w;
+  r->fs = fs;
+  r->dy = d->txt_y - y;
+  r->col = gc->col;
+  r->face = gc->fontface;
 }
 
 static void Xdr_Text(double x, double y, const char *str, double rot,
                      double hadj, const pGEcontext gc, pDevDesc dd) {
-  Xdr_TextImpl(x, y, str, rot, hadj, gc, dd);
+  Xdr_TextImpl(x, y, str, rot, hadj, gc, dd, 1);
 }
 
 #if R_GE_version >= 13
@@ -1771,6 +1918,7 @@ static int capture_region(xdrDesc *d, SEXP fn, int kind, int luminance) {
 }
 
 static SEXP Xdr_SetClipPath(SEXP path, SEXP ref, pDevDesc dd) {
+  text_flush(dd);
   (void) ref;
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   d->clip_shaped = 0;
@@ -1782,10 +1930,12 @@ static SEXP Xdr_SetClipPath(SEXP path, SEXP ref, pDevDesc dd) {
 }
 
 static void Xdr_ReleaseClipPath(SEXP ref, pDevDesc dd) {
-  (void) ref; (void) dd;
+  text_flush(dd);
+  (void) ref;
 }
 
 static SEXP Xdr_SetMask(SEXP path, SEXP ref, pDevDesc dd) {
+  text_flush(dd);
   (void) ref;
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   d->mask_shaped = 0;
@@ -1888,6 +2038,7 @@ static void Xdr_FillStroke(SEXP path, int rule, const pGEcontext gc, pDevDesc dd
 static void Xdr_Glyph(int n, int *glyphs, double *x, double *y,
                       SEXP font, double size, int colour, double rot,
                       pDevDesc dd) {
+  text_flush(dd);
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   if (d->capturing || n < 1) return;
   if (d->glyph_fun == NULL) {
@@ -1929,7 +2080,9 @@ static void Xdr_Glyph(int n, int *glyphs, double *x, double *y,
   for (int i = 0; i < n; i++) {
     const char *ch = Rf_translateCharUTF8(STRING_ELT(chars, i));
     if (ch[0] == '\0') { unmapped++; continue; }
-    Xdr_Text(x[i], y[i], ch, rot, 0.0, &gc, dd);
+    /* the engine already positioned every glyph; coalescing would hand
+     that spacing back to the renderer */
+    Xdr_TextImpl(x[i], y[i], ch, rot, 0.0, &gc, dd, 0);
   }
   if (unmapped && !d->glyph_warned_unmapped) {
     Rf_warning("easeling: %d glyph(s) had no character mapping in the font "
@@ -1941,7 +2094,8 @@ static void Xdr_Glyph(int n, int *glyphs, double *x, double *y,
 #endif
 
 static void Xdr_ReleaseMask(SEXP ref, pDevDesc dd) {
-  (void) ref; (void) dd;
+  text_flush(dd);
+  (void) ref;
 }
 #endif
 
@@ -2026,6 +2180,8 @@ SEXP easeling_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
 
   dd->left = 0; dd->right = dev_w;
   dd->top = 0; dd->bottom = dev_h;
+  xd->clip_x0 = 0.0; xd->clip_x1 = dev_w;
+  xd->clip_y0 = 0.0; xd->clip_y1 = dev_h;
   dd->clipLeft = dd->left; dd->clipRight = dd->right;
   dd->clipTop = dd->top; dd->clipBottom = dd->bottom;
 

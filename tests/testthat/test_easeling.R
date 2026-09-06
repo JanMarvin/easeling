@@ -1389,3 +1389,270 @@ test_that("a failing glyph lookup drops the glyphs without crashing", {
   dev.off()
   expect_equal(count_matches(f, "<a:t>"), 0)
 })
+
+# text run coalescing --------------------------------------------------------
+
+# gridtext (ggtext) lays a line out itself and calls text() once per word;
+# adjacent runs on one baseline must end up as a:r siblings in one shape so
+# the renderer, not our width estimate, does the intra-line spacing.
+
+# a shape carries text when its a:p has content; empty ones are written
+# as <a:p/>, so this counts text boxes without counting the page
+# background or any other shape a plot happens to emit
+text_shapes <- function(file) count_matches(file, "<a:p><a:pPr")
+
+# shown when a coalescing expectation fails, so a run on another platform
+# says which shapes were written rather than only how many
+shape_dump <- function(file) {
+  body <- read_xml_text(file)
+  sps <- regmatches(body, gregexpr("<xdr:sp .*?</xdr:sp>", body))[[1]]
+  paste0("\n", paste(vapply(sps, function(sp) {
+    off <- regmatches(sp, regexpr("<a:off[^/]*/><a:ext[^/]*/>", sp))
+    txt <- paste(regmatches(sp, gregexpr("<a:t>[^<]*</a:t>", sp))[[1]],
+                 collapse = " ")
+    paste(if (length(off)) off else "<no xfrm>",
+          if (nzchar(txt)) txt else "<no text>")
+  }, ""), collapse = "\n"))
+}
+
+blank_dev <- function(...) {
+  f <- easel_dev(width = 4, height = 1, metrics = FALSE, ...)
+  par(mar = rep(0, 4))
+  plot.new()
+  f
+}
+
+# text() centres a string vertically using its own metrics, and which
+# metrics the engine uses for that has changed between R versions. Tests
+# that expect a merge therefore repeat one word, so every call is placed
+# on the same baseline whatever rule the engine applies.
+test_that("adjacent text calls on one baseline become runs in a single shape", {
+  f <- blank_dev()
+  x <- 0.05
+  for (i in 1:3) {
+    text(grconvertX(x, "npc", "user"), grconvertY(0.5, "npc", "user"),
+         "run", adj = c(0, 0.5))
+    x <- x + strwidth("run ", units = "figure")
+  }
+  dev.off()
+  expect_equal(text_shapes(f), 1L, info = shape_dump(f))
+  expect_equal(count_matches(f, "<a:r>"), 3L)
+})
+
+test_that("text on different baselines is not coalesced", {
+  f <- blank_dev()
+  text(grconvertX(0.05, "npc", "user"), grconvertY(0.3, "npc", "user"),
+       "alpha", adj = c(0, 0.5))
+  text(grconvertX(0.05, "npc", "user"), grconvertY(0.7, "npc", "user"),
+       "beta", adj = c(0, 0.5))
+  dev.off()
+  expect_equal(text_shapes(f), 2L)
+})
+
+test_that("distant text on one baseline is not coalesced", {
+  f <- blank_dev()
+  y <- grconvertY(0.5, "npc", "user")
+  text(grconvertX(0.05, "npc", "user"), y, "alpha", adj = c(0, 0.5))
+  text(grconvertX(0.60, "npc", "user"), y, "beta", adj = c(0, 0.5))
+  dev.off()
+  expect_equal(text_shapes(f), 2L)
+})
+
+test_that("an intervening shape flushes buffered text in order", {
+  f <- blank_dev()
+  y <- grconvertY(0.5, "npc", "user")
+  text(grconvertX(0.05, "npc", "user"), y, "alpha", adj = c(0, 0.5))
+  rect(grconvertX(0.4, "npc", "user"), grconvertY(0.1, "npc", "user"),
+       grconvertX(0.5, "npc", "user"), grconvertY(0.9, "npc", "user"),
+       col = "#123456")
+  dev.off()
+  body <- read_xml_text(f)
+  expect_lt(regexpr("<a:t>alpha</a:t>", body, fixed = TRUE),
+            regexpr("123456", body, fixed = TRUE))
+})
+
+test_that("coalesced runs keep their own colour and face", {
+  # every call here uses the same string and the same face, because the
+  # engine derives the baseline of a centred string from its metrics and
+  # both of those feed into it - two calls that differ in either are two
+  # baselines, and a merge would be wrong rather than missing. gridtext
+  # puts a whole line on one explicit baseline, which is why marked-up
+  # titles merge across colour, face and size in practice.
+  f <- blank_dev()
+  y <- grconvertY(0.5, "npc", "user")
+  x <- 0.05
+  text(grconvertX(x, "npc", "user"), y, "run", adj = c(0, 0.5),
+       col = "#112233", font = 2)
+  x <- x + strwidth("run ", units = "figure")
+  text(grconvertX(x, "npc", "user"), y, "run", adj = c(0, 0.5),
+       col = "#445566", font = 2)
+  dev.off()
+  expect_equal(text_shapes(f), 1L, info = shape_dump(f))
+  expect_equal(count_matches(f, "<a:r>"), 2L)
+  expect_equal(count_matches(f, "112233"), 1L)
+  expect_equal(count_matches(f, "445566"), 1L)
+  # each run carries its own rPr, so the face is written twice
+  expect_equal(count_matches(f, 'b="1"'), 2L)
+})
+
+test_that("text that is merely nearby is not coalesced", {
+  # half a space short of adjacency: a different string that happens to sit
+  # close, not a continuation of the same line
+  f <- blank_dev()
+  y <- grconvertY(0.5, "npc", "user")
+  text(grconvertX(0.05, "npc", "user"), y, "alpha", adj = c(0, 0.5))
+  x <- 0.05 + strwidth("alpha", units = "figure") +
+    0.5 * strwidth(" ", units = "figure")
+  text(grconvertX(x, "npc", "user"), y, "beta", adj = c(0, 0.5))
+  dev.off()
+  expect_equal(text_shapes(f), 2L)
+})
+
+test_that("a size change breaks the run", {
+  f <- blank_dev()
+  y <- grconvertY(0.5, "npc", "user")
+  text(grconvertX(0.05, "npc", "user"), y, "alpha", adj = c(0, 0.5))
+  x <- 0.05 + strwidth("alpha ", units = "figure")
+  text(grconvertX(x, "npc", "user"), y, "beta", adj = c(0, 0.5), cex = 1.5)
+  dev.off()
+  expect_equal(text_shapes(f), 2L)
+})
+
+test_that("glyph runs keep their engine-given positions", {
+  skip_if_not(getRversion() >= "4.3.0")
+  skip_if_not_installed("systemfonts")
+  f <- easel_dev(width = 3, height = 2, metrics = FALSE)
+  plot.new()
+  grid::grid.glyph(make_glyphs(c("H", "i"), col = "forestgreen"))
+  dev.off()
+  expect_equal(text_shapes(f), 2L)
+})
+
+# super- and subscripts ------------------------------------------------------
+
+# gridtext emits <sup>/<sub> as a smaller run a quarter em off the baseline,
+# butted against the run before it; those join the line as baseline-shifted
+# runs rather than breaking it into separate shapes.
+script_run <- function(base_cex, script_cex, em_up) {
+  f <- blank_dev(pointsize = 12)
+  y <- grconvertY(0.5, "npc", "user")
+  in_per_user <- diff(grconvertY(c(0, 1), "user", "inches"))
+  text(grconvertX(0.05, "npc", "user"), y, "x", adj = c(0, 0.5), cex = base_cex)
+  x <- 0.05 + strwidth("x", units = "figure")
+  text(grconvertX(x, "npc", "user"), y + em_up * 12 / 72 / in_per_user,
+       "x", adj = c(0, 0.5), cex = script_cex)
+  dev.off()
+  f
+}
+
+test_that("a superscript joins the line as a raised run", {
+  f <- script_run(1, 0.8, 0.264)
+  expect_equal(text_shapes(f), 1L, info = shape_dump(f))
+  expect_equal(count_matches(f, "<a:r>"), 2L)
+  expect_equal(count_matches(f, 'baseline="[0-9]+"'), 1L)
+})
+
+test_that("a subscript joins the line as a lowered run", {
+  f <- script_run(1, 0.8, -0.264)
+  expect_equal(text_shapes(f), 1L, info = shape_dump(f))
+  expect_equal(count_matches(f, 'baseline="-[0-9]+"'), 1L)
+})
+
+test_that("a small run too far off the baseline is a separate line", {
+  f <- script_run(1, 0.8, 1.2)
+  expect_equal(text_shapes(f), 2L)
+  expect_equal(count_matches(f, "baseline="), 0L)
+})
+
+test_that("a same-size run off the baseline is a separate line", {
+  f <- script_run(1, 1, 0.264)
+  expect_equal(text_shapes(f), 2L)
+})
+
+# canvas containment ---------------------------------------------------------
+
+shape_boxes <- function(file) {
+  body <- read_xml_text(file)
+  m <- regmatches(body, gregexpr(
+    '<a:off x="(-?[0-9]+)" y="(-?[0-9]+)"/><a:ext cx="([0-9]+)" cy="([0-9]+)"', body))[[1]]
+  n <- as.numeric(regmatches(m, gregexpr("-?[0-9]+", m)) |> unlist())
+  matrix(n, ncol = 4, byrow = TRUE) / 12700
+}
+
+test_that("nothing is emitted outside the canvas", {
+  # xpd = NA hands the device a clip rect larger than the canvas; a raster
+  # drawn through it used to spill past the group frame
+  w <- 4
+  h <- 3
+  f <- easel_dev(width = w, height = h, metrics = FALSE)
+  par(mar = rep(0, 4), xpd = NA)
+  plot.new()
+  ras <- as.raster(matrix(c("red", "blue", "green", "black"), 2, 2))
+  rasterImage(ras, -1.5, -1.5, 2.5, 2.5)
+  rect(-2, -2, 3, 3, col = NA, border = "black")
+  lines(c(-2, 3), c(0.5, 0.5))
+  dev.off()
+  b <- shape_boxes(f)
+  expect_gt(nrow(b), 1L)
+  expect_true(all(b[, 1] >= -1e-6))
+  expect_true(all(b[, 2] >= -1e-6))
+  expect_true(all(b[, 1] + b[, 3] <= w * 72 + 1e-6))
+  expect_true(all(b[, 2] + b[, 4] <= h * 72 + 1e-6))
+})
+
+test_that("a clip rect wider than the canvas is clamped to it", {
+  f <- easel_dev(width = 2, height = 2, metrics = FALSE)
+  par(mar = rep(0, 4), xpd = NA)
+  plot.new()
+  ras <- as.raster(matrix("red", 1, 1))
+  rasterImage(ras, -5, -5, 6, 6)
+  dev.off()
+  # shape_boxes also matches the enclosing group, which is the canvas, so
+  # every box here should be exactly the canvas
+  b <- shape_boxes(f)
+  expect_gt(nrow(b), 0L)
+  expect_true(all(b[, 1] == 0 & b[, 2] == 0 & b[, 3] == 144 & b[, 4] == 144))
+})
+
+# font substitution ----------------------------------------------------------
+
+test_that("font_match reports what would actually be measured", {
+  skip_if_not_installed("systemfonts")
+  m <- font_match("NoSuchFont123")
+  skip_if(is.null(m) || !m$substituted)
+  expect_equal(m$requested, "NoSuchFont123")
+  expect_true(nzchar(m$matched))
+  expect_false(identical(m$matched, m$requested))
+  expect_false(font_match(systemfonts::font_info("sans")$family)$substituted)
+})
+
+test_that("a substituted font does not change what the drawing asks for", {
+  skip_if_not_installed("systemfonts")
+  m <- font_match("NoSuchFont123")
+  skip_if(is.null(m) || !m$substituted)
+  expect_silent({
+    f <- easel_dev(width = 2, height = 2, fontname = "NoSuchFont123")
+    par(mar = rep(0, 4))
+    plot.new()
+    text(0.5, 0.5, "hello")
+    dev.off()
+  })
+  expect_gt(count_matches(f, 'typeface="NoSuchFont123"'), 0L)
+})
+
+test_that("an installed font is measured silently", {
+  skip_if_not_installed("systemfonts")
+  fam <- systemfonts::font_info("sans")$family
+  expect_silent({
+    easel_dev(width = 2, height = 2, fontname = fam)
+    dev.off()
+  })
+})
+
+test_that("metrics = FALSE never consults the system", {
+  expect_silent({
+    easel_dev(width = 2, height = 2, fontname = "NoSuchFont123",
+              metrics = FALSE)
+    dev.off()
+  })
+})

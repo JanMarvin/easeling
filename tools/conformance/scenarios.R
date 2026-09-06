@@ -37,3 +37,22 @@ scenarios <- list(
   list("pkg_corrplot", function() corrplot::corrplot(cor(mtcars[,1:6]), method="ellipse"), 5, 5),
   list("pkg_sf_map", function() { nc <- sf::st_read(system.file("shape/nc.shp", package="sf"), quiet=TRUE); plot(nc["AREA"], main="nc") }, 6, 4)
 )
+
+scenarios <- c(scenarios, list(list(
+  "text_coalesced_runs",
+  function() {
+    par(mar = rep(0, 4)); plot.new()
+    words <- c("Coalesced", "runs", "stay", "on", "one", "baseline", "with",
+               "mixed", "colour", "and", "bold", "emphasis")
+    cols <- ifelse(seq_along(words) %% 4 == 0, "firebrick", "grey20")
+    face <- ifelse(words %in% c("bold", "emphasis"), 2, 1)
+    x <- 0.02
+    y <- grconvertY(0.5, "npc", "user")
+    for (i in seq_along(words)) {
+      text(grconvertX(x, "npc", "user"), y, words[i], adj = c(0, 0.5),
+           col = cols[i], font = face[i])
+      x <- x + strwidth(paste0(words[i], " "), units = "figure")
+    }
+  },
+  6, 1.2
+)))

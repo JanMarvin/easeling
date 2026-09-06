@@ -60,15 +60,24 @@ layout places it visibly off; see
 `system.file("examples", "calibrate_text.R", package = "easeling")`.}
 
 \item{metrics}{Font metrics used for text layout (string widths,
-vertical centring, margins). `NULL` (default): use real metrics for
-`fontname` via the `systemfonts` package when it is installed,
-otherwise the built-in Calibri-like table. `FALSE`: always use the
-built-in table. Or a list with numeric components `widths`,
-`ascents`, `descents`, each of length 95 giving em fractions for the
-ASCII characters 32..126. Metrics only affect what R computes -
-rendering is always done by the spreadsheet application with the real
-font - but better metrics mean legend boxes, margins, and centring
-are sized for the text that will actually appear.}
+  vertical centring, margins). `NULL` (default): use real metrics for
+  `fontname` via the `systemfonts` package when it is installed,
+  otherwise the built-in Calibri-like table. `FALSE`: always use the
+  built-in table. Or a list with numeric components `widths`,
+  `ascents`, `descents`, each of length 95 giving em fractions for the
+  ASCII characters 32..126. Metrics only affect what R computes -
+  rendering is always done by the spreadsheet application with the real
+  font - but better metrics mean legend boxes, margins, and centring
+  are sized for the text that will actually appear.
+
+  The machine writing the file need not have the font it will be opened
+  with, and `systemfonts` substitutes without saying so; [font_match()]
+  reports which font was measured. To get real metrics for a font this
+  machine lacks, install a replacement built to match it (Carlito for
+  Calibri, Liberation Sans for Arial, Liberation Serif for Times New
+  Roman), point `systemfonts` at the actual file with
+  `systemfonts::register_font("Calibri", plain = "calibri.ttf")` before
+  opening the device, or pass the numbers in `metrics` yourself.}
 }
 \value{
 The output file path, invisibly.

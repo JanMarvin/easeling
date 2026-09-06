@@ -4,7 +4,6 @@
 #' shapes, suitable for `openxlsx2::wb_add_drawing(xml = file)`. No
 #' dependency on Cairo, FreeType, fontconfig, or xml2.
 #'
-#' @param file Path to the output XML file. Defaults to a temp file.
 #' @param width,height Device size in inches.
 #' @param pointsize Default font pointsize.
 #' @param fontname Default font typeface (matches `openxlsx2::wb_add_font()`'s
@@ -34,6 +33,15 @@
 #'   rendering is always done by the spreadsheet application with the real
 #'   font - but better metrics mean legend boxes, margins, and centring
 #'   are sized for the text that will actually appear.
+#'
+#'   The machine writing the file need not have the font it will be opened
+#'   with, and `systemfonts` substitutes without saying so; [font_match()]
+#'   reports which font was measured. To get real metrics for a font this
+#'   machine lacks, install a replacement built to match it (Carlito for
+#'   Calibri, Liberation Sans for Arial, Liberation Serif for Times New
+#'   Roman), point `systemfonts` at the actual file with
+#'   `systemfonts::register_font("Calibri", plain = "calibri.ttf")` before
+#'   opening the device, or pass the numbers in `metrics` yourself.
 #' @param text_voff Vertical text calibration in em: text boxes are
 #'   centre-anchored, and the baseline is placed `text_voff` em below the
 #'   box centre. The default `0.35` was calibrated against Excel's line layout for
@@ -253,6 +261,33 @@ resolve_metrics <- function(metrics, fontname) {
 has_systemfonts <- function() {
   requireNamespace("systemfonts", quietly = TRUE)
 }
+
+#' Which font is actually measured for a typeface
+#'
+#' The machine writing a drawing need not have the font the drawing will be
+#' opened with. `systemfonts` substitutes without saying so, and the plot is
+#' then laid out with one font's widths while the drawing asks the
+#' spreadsheet application for another. Often that costs nothing, because
+#' some substitutes exist to match: Carlito for Calibri, Liberation Sans for
+#' Arial, Liberation Serif for Times New Roman. Others are unrelated fonts of
+#' quite different width. The device does not check, so call this when a
+#' drawing's layout looks wrong and you want to know which font produced it.
+#'
+#' @param fontname Typeface the drawing will name.
+#' @return A list with `requested`, `matched` and `substituted`, or `NULL`
+#'   when `systemfonts` is not installed.
+#' @examples
+#' font_match("Calibri")
+#' @export
+font_match <- function(fontname) {
+  if (!has_systemfonts()) return(NULL)
+  matched <- tryCatch(systemfonts::font_info(fontname, size = 1000)$family,
+                      error = function(e) NULL)               # nocov
+  if (length(matched) != 1L || is.na(matched)) return(NULL)   # nocov
+  list(requested = fontname, matched = matched,
+       substituted = !identical(tolower(matched), tolower(fontname)))
+}
+
 
 .glyph_cache <- new.env(parent = emptyenv())
 
