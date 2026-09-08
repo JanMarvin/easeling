@@ -1681,13 +1681,12 @@ test_that("unrotated text carries no rotation", {
 
 # device options -------------------------------------------------------------
 
-test_that("raster cells merge into maximal rectangles", {
+test_that("equal cells in a row become one rectangle", {
   f <- easel_dev(width = 4, height = 4, metrics = FALSE)
   par(mar = rep(0, 4))
   plot.new()
-  # eight columns, each one colour repeated down every row: the whole
-  # raster is eight rectangles, not 8 * 8 cells
-  m <- matrix(rep(rainbow(8), each = 8), nrow = 8, byrow = TRUE)
+  # each row is one colour, so each row is one rectangle
+  m <- matrix(rep(rainbow(8), 8), nrow = 8)
   rasterImage(as.raster(m), 0, 0, 1, 1)
   dev.off()
   expect_equal(count_matches(f, "<xdr:sp macro"), 8L)

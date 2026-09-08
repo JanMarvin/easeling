@@ -1157,97 +1157,69 @@ static void Xdr_Raster(unsigned int *raster, int w, int h,
     cos_r = cos(t);
   }
 
-  /* Merge equal cells into maximal rectangles rather than one shape per
-   horizontal run. A gradient that varies along one axis only - a colour
-   bar, a heatmap band - collapses to a handful of shapes instead of one
-   per cell, which is the difference between a workbook that opens and
-   one that does not. */
-  size_t n = (size_t) w * (size_t) h;
-  char *done = (char *) calloc(n, 1);
-  if (done == NULL) Rf_error("easeling: out of memory rasterising"); /* nocov */
-
   for (int j = 0; j < h; j++) {
-    for (int i = 0; i < w; i++) {
-      size_t at = (size_t) j * (size_t) w + (size_t) i;
-      if (done[at]) continue;
-      unsigned int col = raster[at];
-      if (R_TRANSPARENT((int) col)) { done[at] = 1; continue; }
-
-      int rw = 1;
-      while (i + rw < w && !done[at + (size_t) rw] &&
-             raster[at + (size_t) rw] == col) rw++;
-
-      int rh = 1;
-      while (j + rh < h) {
-        size_t row = at + (size_t) rh * (size_t) w;
-        int k = 0;
-        while (k < rw && !done[row + (size_t) k] &&
-               raster[row + (size_t) k] == col) k++;
-        if (k < rw) break;
-        rh++;
-      }
-
-      for (int b = 0; b < rh; b++)
-        memset(done + at + (size_t) b * (size_t) w, 1, (size_t) rw);
-
-      double rx0 = left + i * cell_w;
-      double rx1 = left + (i + rw) * cell_w;
-      double ry0 = top + j * cell_h;
-      double ry1 = top + (j + rh) * cell_h;
-      /* Opaque rectangles bleed half a cell right/down (renderers
-       antialias the seams between adjacent rects otherwise); whatever
-       is under the overlap is drawn later and paints over it.
-       Translucent cells can't overlap or the seams would double up, and
-       neither can a cell whose neighbour is transparent - there is
-       nothing there to paint the bleed out again. */
-      if (R_ALPHA((int) col) == 255) {
-        int solid = 1;
-        if (i + rw < w) {
-          for (int b = 0; b < rh && solid; b++)
-            if (R_TRANSPARENT((int) raster[at + (size_t) b * (size_t) w
-                                              + (size_t) rw])) solid = 0;
-          if (solid) rx1 += cell_w * 0.5;
+    int i = 0;
+    while (i < w) {
+      unsigned int col = raster[(size_t) j * (size_t) w + (size_t) i];
+      int run = 1;
+      while (i + run < w &&
+             raster[(size_t) j * (size_t) w + (size_t) (i + run)] == col) run++;
+      if (!R_TRANSPARENT((int) col)) {
+        double rx0 = left + i * cell_w;
+        double rx1 = left + (i + run) * cell_w;
+        double ry0 = top + j * cell_h;
+        double ry1 = top + (j + 1) * cell_h;
+        /* Opaque cells bleed half a cell right/down (renderers antialias
+         the seams between adjacent rects otherwise); the neighbouring
+         cells are drawn later and paint over the overlap. Translucent
+         cells can't overlap or the seams would double up, and neither
+         can a cell whose neighbour is transparent - nothing is drawn
+         there afterwards to paint the bleed out again. */
+        if (R_ALPHA((int) col) == 255) {
+          size_t at = (size_t) j * (size_t) w + (size_t) i;
+          if (i + run < w &&
+              !R_TRANSPARENT((int) raster[at + (size_t) run]))
+            rx1 += cell_w * 0.5;
+          if (j + 1 < h) {
+            size_t below = at + (size_t) w;
+            int solid = 1;
+            for (int b = 0; b < run && solid; b++)
+              if (R_TRANSPARENT((int) raster[below + (size_t) b])) solid = 0;
+            if (solid) ry1 += cell_h * 0.5;
+          }
         }
-        solid = 1;
-        if (j + rh < h) {
-          size_t below = at + (size_t) rh * (size_t) w;
-          for (int b = 0; b < rw && solid; b++)
-            if (R_TRANSPARENT((int) raster[below + (size_t) b])) solid = 0;
-          if (solid) ry1 += cell_h * 0.5;
+        if (!rotated) {
+          double cx0 = fmin(d->clip_x0, d->clip_x1);
+          double cx1 = fmax(d->clip_x0, d->clip_x1);
+          double cy0 = fmin(d->clip_y0, d->clip_y1);
+          double cy1 = fmax(d->clip_y0, d->clip_y1);
+          if (rx0 < cx0) rx0 = cx0;
+          if (rx1 > cx1) rx1 = cx1;
+          if (ry0 < cy0) ry0 = cy0;
+          if (ry1 > cy1) ry1 = cy1;
+          if (rx1 <= rx0 || ry1 <= ry0) { i += run; continue; }
+          sp_open(d, "");
+          mb_printf(&d->out, "<xdr:spPr>");
+          xfrm(d, rx0, ry0, rx1, ry1);
+          mb_printf(&d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
+          fill_props(d, (int) col);
+          mb_printf(&d->out, "<a:ln><a:noFill/></a:ln>");
+          mb_printf(&d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
+        } else {
+          double qx[4] = {rx0, rx1, rx1, rx0};
+          double qy[4] = {ry0, ry0, ry1, ry1};
+          double px[4], py[4];
+          for (int k = 0; k < 4; k++) {
+            double dx = qx[k] - x, dy = qy[k] - y;
+            px[k] = x + dx * cos_r + dy * sin_r;
+            py[k] = y - dx * sin_r + dy * cos_r;
+          }
+          emit_filled_quad(d, px, py, (int) col);
         }
       }
-
-      if (!rotated) {
-        double cx0 = fmin(d->clip_x0, d->clip_x1);
-        double cx1 = fmax(d->clip_x0, d->clip_x1);
-        double cy0 = fmin(d->clip_y0, d->clip_y1);
-        double cy1 = fmax(d->clip_y0, d->clip_y1);
-        if (rx0 < cx0) rx0 = cx0;
-        if (rx1 > cx1) rx1 = cx1;
-        if (ry0 < cy0) ry0 = cy0;
-        if (ry1 > cy1) ry1 = cy1;
-        if (rx1 <= rx0 || ry1 <= ry0) continue;
-        sp_open(d, "");
-        mb_printf(&d->out, "<xdr:spPr>");
-        xfrm(d, rx0, ry0, rx1, ry1);
-        mb_printf(&d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
-        fill_props(d, (int) col);
-        mb_printf(&d->out, "<a:ln><a:noFill/></a:ln>");
-        mb_printf(&d->out, "</xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p/></xdr:txBody></xdr:sp>\n");
-      } else {
-        double qx[4] = {rx0, rx1, rx1, rx0};
-        double qy[4] = {ry0, ry0, ry1, ry1};
-        double px[4], py[4];
-        for (int k = 0; k < 4; k++) {
-          double dx = qx[k] - x, dy = qy[k] - y;
-          px[k] = x + dx * cos_r + dy * sin_r;
-          py[k] = y - dx * sin_r + dy * cos_r;
-        }
-        emit_filled_quad(d, px, py, (int) col);
-      }
+      i += run;
     }
   }
-  free(done);
 }
 
 static void Xdr_Activate(const pDevDesc dd) { (void) dd; }
