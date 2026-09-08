@@ -4,7 +4,17 @@
 #' shapes, suitable for `openxlsx2::wb_add_drawing(xml = file)`. No
 #' dependency on Cairo, FreeType, fontconfig, or xml2.
 #'
-#' @param width,height Device size in inches.
+#' @param width,height Device size, in `units`.
+#' @param units Unit for `width` and `height`: `"in"` (default), `"cm"`,
+#'   `"mm"` or `"px"`. Pixels are 96 per inch, the value spreadsheet
+#'   applications use. Ignored when `dims` is given, since a cell region
+#'   already fixes the size.
+#' @param bg Background colour drawn behind the plot. The default, `NA`,
+#'   leaves the drawing transparent so the sheet shows through.
+#' @param symbolfamily Typeface asked for on plotmath symbols. The glyphs
+#'   are written as Unicode either way, so this only matters when
+#'   `fontname` lacks them: `"Cambria Math"` is the usual choice on
+#'   Windows. Empty (the default) keeps symbols in `fontname`.
 #' @param pointsize Default font pointsize.
 #' @param fontname Default font typeface (matches `openxlsx2::wb_add_font()`'s
 #'   `name` argument), e.g. `"Calibri"`, `"Arial"`. Used whenever R itself
@@ -65,12 +75,14 @@
 #' plot(1:10, (1:10)^2, type = "b")
 #' dev.off()
 easel_dev <- function(file = tempfile(fileext = ".xml"), width = 6, height = 6,
-                     pointsize = 12, fontname = "Calibri",
+                     units = "in", pointsize = 12, fontname = "Calibri",
+                     bg = NA, symbolfamily = "",
                      underline = FALSE, strikeout = FALSE,
                      dims = NULL, wb = NULL, sheet = 1, text_voff = 0.35,
                      metrics = NULL) {
   file <- path.expand(file[1L])
-  easel_dev_impl(file, NULL, width = width, height = height, metrics = metrics,
+  easel_dev_impl(file, NULL, width = width, height = height, units = units,
+                 metrics = metrics, bg = bg, symbolfamily = symbolfamily,
                  pointsize = pointsize, fontname = fontname,
                  underline = underline, strikeout = strikeout,
                  dims = dims, wb = wb, sheet = sheet, text_voff = text_voff)
@@ -80,14 +92,19 @@ easel_dev_impl <- function(file, env, width = 6, height = 6,
                      pointsize = 12, fontname = "Calibri",
                      underline = FALSE, strikeout = FALSE,
                      dims = NULL, wb = NULL, sheet = 1, text_voff = 0.35,
-                     metrics = NULL) {
+                     metrics = NULL, units = "in", bg = NA,
+                     symbolfamily = "") {
   if (!is.null(dims)) {
     sz <- easel_size(dims, wb = wb, sheet = sheet)
     width <- sz[["width"]]
     height <- sz[["height"]]
+    units <- "in"
   }
-  width <- as.double(width[1L])
-  height <- as.double(height[1L])
+  units <- match.arg(units, c("in", "cm", "mm", "px"))
+  scale <- switch(units, "in" = 1, "cm" = 1 / 2.54, "mm" = 1 / 25.4,
+                  "px" = 1 / 96)
+  width <- as.double(width[1L]) * scale
+  height <- as.double(height[1L]) * scale
   pointsize <- as.double(pointsize[1L])
   if (!is.finite(width) || width <= 0 || !is.finite(height) || height <= 0)
     stop("'width' and 'height' must be positive")
@@ -99,11 +116,14 @@ easel_dev_impl <- function(file, env, width = 6, height = 6,
   text_voff <- as.double(text_voff[1L])
   if (!is.finite(text_voff) || abs(text_voff) > 1)
     stop("'text_voff' must be a finite value in [-1, 1]")
+  bg <- if (length(bg) && !is.na(bg[1L])) as.character(bg[1L]) else "transparent"
+  symbolfamily <- as.character(symbolfamily[1L])
+  if (is.na(symbolfamily)) symbolfamily <- ""
   invisible(.Call(C_easeling_, file, width, height, pointsize, fontname,
                   isTRUE(as.logical(underline[1L])),
                   isTRUE(as.logical(strikeout[1L])), text_voff, env,
                   resolve_metrics(metrics, fontname),
-                  if (has_systemfonts()) glyph_chars))
+                  if (has_systemfonts()) glyph_chars, bg, symbolfamily))
   invisible(file)
 }
 

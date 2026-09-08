@@ -888,7 +888,7 @@ test_that("a path that vanishes before close warns instead of erroring", {
 test_that("internal entry point rejects memory mode without an environment", {
   expect_error(
     .Call(easeling:::C_easeling_, NULL, 3, 3, 12, "Calibri",
-          FALSE, FALSE, 0.35, NULL, NULL, NULL),
+          FALSE, FALSE, 0.35, NULL, NULL, NULL, "transparent", ""),
     "environment"
   )
 })
@@ -938,7 +938,8 @@ test_that("invalid metrics are rejected", {
                "finite non-negative")
   expect_error(
     .Call(easeling:::C_easeling_, NULL, 3, 3, 12, "Calibri",
-          FALSE, FALSE, 0.35, new.env(), c(1, 2, 3), NULL),
+          FALSE, FALSE, 0.35, new.env(), c(1, 2, 3), NULL,
+          "transparent", ""),
     "285")
 })
 
@@ -1676,4 +1677,90 @@ test_that("unrotated text carries no rotation", {
   dev.off()
   expect_equal(count_matches(f, "<a:xfrm rot="), 0L)
   expect_equal(count_matches(f, "<a:bodyPr rot="), 0L)
+})
+
+# device options -------------------------------------------------------------
+
+test_that("raster cells merge into maximal rectangles", {
+  f <- easel_dev(width = 4, height = 4, metrics = FALSE)
+  par(mar = rep(0, 4))
+  plot.new()
+  # eight columns, each one colour repeated down every row: the whole
+  # raster is eight rectangles, not 8 * 8 cells
+  m <- matrix(rep(rainbow(8), each = 8), nrow = 8, byrow = TRUE)
+  rasterImage(as.raster(m), 0, 0, 1, 1)
+  dev.off()
+  expect_equal(count_matches(f, "<xdr:sp macro"), 8L)
+})
+
+test_that("transparent raster cells emit nothing", {
+  f <- easel_dev(width = 4, height = 4, metrics = FALSE)
+  par(mar = rep(0, 4))
+  plot.new()
+  m <- matrix(c("red", NA, NA, NA), nrow = 2)
+  rasterImage(as.raster(m), 0, 0, 1, 1)
+  dev.off()
+  expect_equal(count_matches(f, "<xdr:sp macro"), 1L)
+})
+
+test_that("width and height accept other units", {
+  size <- function(...) {
+    easel_dev(metrics = FALSE, ...)
+    on.exit(dev.off())
+    par("din")
+  }
+  expect_equal(size(width = 6, height = 4), c(6, 4))
+  expect_equal(size(width = 15.24, height = 10.16, units = "cm"), c(6, 4))
+  expect_equal(size(width = 152.4, height = 101.6, units = "mm"), c(6, 4))
+  expect_equal(size(width = 576, height = 384, units = "px"), c(6, 4))
+})
+
+test_that("bg draws a background, and NA leaves the drawing transparent", {
+  f <- easel_dev(width = 2, height = 2, bg = "white", metrics = FALSE)
+  par(mar = rep(0, 4))
+  plot.new()
+  dev.off()
+  expect_equal(count_matches(f, 'srgbClr val="FFFFFF"'), 1L)
+
+  f <- easel_dev(width = 2, height = 2, metrics = FALSE)
+  par(mar = rep(0, 4))
+  plot.new()
+  dev.off()
+  expect_equal(count_matches(f, "<xdr:sp macro"), 0L)
+})
+
+test_that("symbolfamily applies to plotmath symbols only", {
+  f <- easel_dev(width = 4, height = 3, symbolfamily = "Cambria Math",
+                 metrics = FALSE)
+  plot(1:10, main = expression(alpha %->% infinity), xlab = "plain label")
+  dev.off()
+  expect_gt(count_matches(f, 'typeface="Cambria Math"'), 0L)
+  expect_gt(count_matches(f, 'typeface="Calibri"'), 0L)
+})
+
+raster_cell <- function(m) {
+  f <- easel_dev(width = 4, height = 4, metrics = FALSE)
+  par(mar = rep(0, 4))
+  plot.new()
+  rasterImage(as.raster(m), 0, 0, 1, 1)
+  full <- diff(grconvertX(c(0, 1), "user", "device"))
+  dev.off()
+  # row 1 is the enclosing group; row 2 is the first cell drawn, the one
+  # with a neighbour on both the right and below
+  b <- shape_boxes(f)
+  c(width = unname(b[2L, 3]), half = full / 2)
+}
+
+test_that("an opaque cell does not bleed into a transparent neighbour", {
+  # nothing is drawn over the overlap in a transparent cell, so the rect
+  # has to stop at the cell boundary
+  v <- raster_cell(matrix(c("red", NA, NA, NA), nrow = 2))
+  expect_equal(unname(v[["width"]]), unname(v[["half"]]), tolerance = 1e-4)
+})
+
+test_that("an opaque cell still bleeds into an opaque neighbour", {
+  # half a cell of overlap, painted over by the neighbour drawn after it
+  v <- raster_cell(matrix(c("red", "blue", "green", "black"), nrow = 2))
+  expect_equal(unname(v[["width"]]), unname(v[["half"]]) * 1.5,
+               tolerance = 1e-4)
 })

@@ -8,8 +8,11 @@ easel_dev(
   file = tempfile(fileext = ".xml"),
   width = 6,
   height = 6,
+  units = "in",
   pointsize = 12,
   fontname = "Calibri",
+  bg = NA,
+  symbolfamily = "",
   underline = FALSE,
   strikeout = FALSE,
   dims = NULL,
@@ -23,7 +26,12 @@ easel_dev(
 \item{file}{Path of the XML file to write. Defaults to a temp file.
 For a plain string instead of a file, see [easel_xml()].}
 
-\item{width, height}{Device size in inches.}
+\item{width, height}{Device size, in `units`.}
+
+\item{units}{Unit for `width` and `height`: `"in"` (default), `"cm"`,
+`"mm"` or `"px"`. Pixels are 96 per inch, the value spreadsheet
+applications use. Ignored when `dims` is given, since a cell region
+already fixes the size.}
 
 \item{pointsize}{Default font pointsize.}
 
@@ -35,6 +43,14 @@ doesn't request a specific family — i.e. whenever a plot's own
 actual font name (e.g. `par(family = "Georgia")` or
 `theme_minimal(base_family = "Georgia")`), that takes priority over
 this default.}
+
+\item{bg}{Background colour drawn behind the plot. The default, `NA`,
+leaves the drawing transparent so the sheet shows through.}
+
+\item{symbolfamily}{Typeface asked for on plotmath symbols. The glyphs
+are written as Unicode either way, so this only matters when
+`fontname` lacks them: `"Cambria Math"` is the usual choice on
+Windows. Empty (the default) keeps symbols in `fontname`.}
 
 \item{underline, strikeout}{Apply underline/strikeout to all text on this
 device. Unlike `fontname`, these have no per-call R equivalent (base
