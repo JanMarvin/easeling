@@ -14,6 +14,10 @@
   intersected with the device, which `xpd = NA` can otherwise exceed,
   and raster cells are clipped one by one instead of only as a whole
   image.
+- Rotated text now rotates the shape rather than the text inside it, so
+  selecting a rotated axis label shows handles that follow the glyphs
+  instead of an upright box. The text lands in the same place either
+  way.
 - New [`font_match()`](../reference/font_match.md) reports which font
   was really measured. Writing a drawing on a machine that lacks the
   font it will be opened with is normal, and `systemfonts` substitutes
