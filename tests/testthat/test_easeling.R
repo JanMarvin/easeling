@@ -1656,3 +1656,24 @@ test_that("metrics = FALSE never consults the system", {
     dev.off()
   })
 })
+
+# rotated text ---------------------------------------------------------------
+
+test_that("rotated text rotates the shape, not the text inside it", {
+  # a shape carrying bodyPr rot keeps an upright frame, so selecting a
+  # rotated label shows handles that do not follow the glyphs
+  f <- blank_dev()
+  text(grconvertX(0.5, "npc", "user"), grconvertY(0.5, "npc", "user"),
+       "sideways", srt = 90)
+  dev.off()
+  expect_equal(count_matches(f, '<a:xfrm rot="-5400000">'), 1L)
+  expect_equal(count_matches(f, "<a:bodyPr rot="), 0L)
+})
+
+test_that("unrotated text carries no rotation", {
+  f <- blank_dev()
+  text(grconvertX(0.5, "npc", "user"), grconvertY(0.5, "npc", "user"), "flat")
+  dev.off()
+  expect_equal(count_matches(f, "<a:xfrm rot="), 0L)
+  expect_equal(count_matches(f, "<a:bodyPr rot="), 0L)
+})

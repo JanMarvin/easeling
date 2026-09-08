@@ -151,14 +151,23 @@ static void sp_open(xdrDesc *d, const char *name) {
               d->shape_id++, name);
 }
 
-static void xfrm(xdrDesc *d, double x1, double y1, double x2, double y2) {
+static void xfrm_rot(xdrDesc *d, double x1, double y1, double x2, double y2,
+                     int rot60k) {
   double min_x = x1 < x2 ? x1 : x2;
   double min_y = y1 < y2 ? y1 : y2;
   double cx = fabs(x2 - x1) * PT_TO_EMU;
   double cy = fabs(y2 - y1) * PT_TO_EMU;
 
-  mb_printf(&d->out, "<a:xfrm><a:off x=\"%.0f\" y=\"%.0f\"/><a:ext cx=\"%.0f\" cy=\"%.0f\"/></a:xfrm>",
+  if (rot60k != 0)
+    mb_printf(&d->out, "<a:xfrm rot=\"%d\">", rot60k);
+  else
+    mb_printf(&d->out, "<a:xfrm>");
+  mb_printf(&d->out, "<a:off x=\"%.0f\" y=\"%.0f\"/><a:ext cx=\"%.0f\" cy=\"%.0f\"/></a:xfrm>",
           min_x * PT_TO_EMU, min_y * PT_TO_EMU, cx, cy);
+}
+
+static void xfrm(xdrDesc *d, double x1, double y1, double x2, double y2) {
+  xfrm_rot(d, x1, y1, x2, y2, 0);
 }
 
 static void fill_props(xdrDesc *d, int fill) {
@@ -1739,9 +1748,9 @@ static void text_flush(pDevDesc dd) {
 
   double bx0, by0, bx1, by1;
   if (fabs(rot) > 1e-4) {
-    /* Rotate around the box's own center (matching how the bodyPr rot
-     attribute rotates a shape), solving for the center position such
-     that the anchor point (x,y) lands correctly post-rotation. */
+    /* Rotate around the box's own center (which is what a:xfrm rot does),
+     solving for the center position such that the anchor point (x,y)
+     lands correctly post-rotation. */
     double theta = -rot * M_PI / 180.0;
     double cos_r = cos(theta);
     double sin_r = sin(theta);
@@ -1775,18 +1784,17 @@ static void text_flush(pDevDesc dd) {
     char fbuf[1301];
     esc_xml(d->txt_font, fbuf, sizeof(fbuf));
 
+    /* Rotate the shape, not the text inside it. Both put the ink in the
+     same place, but a shape carrying bodyPr rot keeps an upright frame,
+     so selecting a rotated label in a spreadsheet application shows
+     handles that do not follow the glyphs. */
+    int ooxml_rot = (fabs(rot) > 1e-4) ? (int) (-rot * 60000.0) : 0;
     sp_open(d, "");
     mb_printf(&d->out, "<xdr:spPr>");
-    xfrm(d, bx0, by0, bx1, by1);
+    xfrm_rot(d, bx0, by0, bx1, by1, ooxml_rot);
     mb_printf(&d->out, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/>"
               "<a:ln><a:noFill/></a:ln></xdr:spPr>");
-
-    if (fabs(rot) > 1e-4) {
-      int ooxml_rot = (int) (-rot * 60000.0);
-      mb_printf(&d->out, "<xdr:txBody><a:bodyPr rot=\"%d\" vert=\"horz\" anchor=\"ctr\" wrap=\"none\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/>", ooxml_rot);
-    } else {
-      mb_printf(&d->out, "<xdr:txBody><a:bodyPr anchor=\"ctr\" wrap=\"none\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/>");
-    }
+    mb_printf(&d->out, "<xdr:txBody><a:bodyPr anchor=\"ctr\" wrap=\"none\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/>");
 
     mb_printf(&d->out, "<a:p><a:pPr algn=\"%s\"/>", algn);
     for (int i = 0; i < n; i++) {
