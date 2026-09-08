@@ -18,10 +18,6 @@
   selecting a rotated axis label shows handles that follow the glyphs
   instead of an upright box. The text lands in the same place either
   way.
-- Raster cells now merge into maximal rectangles instead of horizontal
-  runs. A colour bar or a heatmap band that repeats down the image
-  collapses to a handful of shapes: a 100 x 100 gradient goes from
-  10,000 shapes and 3.7 MB to 100 shapes and 38 KB.
 - An opaque raster cell no longer bleeds half a cell into a transparent
   neighbour. The overlap exists so that neighbouring cells paint over
   each other’s antialiased seams, but nothing is drawn over a
