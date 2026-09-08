@@ -11,8 +11,11 @@ easel_dev(
   file = tempfile(fileext = ".xml"),
   width = 6,
   height = 6,
+  units = "in",
   pointsize = 12,
   fontname = "Calibri",
+  bg = NA,
+  symbolfamily = "",
   underline = FALSE,
   strikeout = FALSE,
   dims = NULL,
@@ -32,7 +35,14 @@ easel_dev(
 
 - width, height:
 
-  Device size in inches.
+  Device size, in \`units\`.
+
+- units:
+
+  Unit for \`width\` and \`height\`: \`"in"\` (default), \`"cm"\`,
+  \`"mm"\` or \`"px"\`. Pixels are 96 per inch, the value spreadsheet
+  applications use. Ignored when \`dims\` is given, since a cell region
+  already fixes the size.
 
 - pointsize:
 
@@ -48,6 +58,18 @@ easel_dev(
   plot sets an actual font name (e.g. \`par(family = "Georgia")\` or
   \`theme_minimal(base_family = "Georgia")\`), that takes priority over
   this default.
+
+- bg:
+
+  Background colour drawn behind the plot. The default, \`NA\`, leaves
+  the drawing transparent so the sheet shows through.
+
+- symbolfamily:
+
+  Typeface asked for on plotmath symbols. The glyphs are written as
+  Unicode either way, so this only matters when \`fontname\` lacks them:
+  \`"Cambria Math"\` is the usual choice on Windows. Empty (the default)
+  keeps symbols in \`fontname\`.
 
 - underline, strikeout:
 
@@ -112,6 +134,6 @@ The output file path, invisibly.
 f <- easel_dev(width = 6, height = 4, fontname = "Georgia")
 plot(1:10, (1:10)^2, type = "b")
 dev.off()
-#> agg_record_19101106f230 
-#>                       2 
+#> agg_record_19167548964 
+#>                      2 
 ```

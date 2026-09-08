@@ -49,8 +49,11 @@ dependency on Cairo, FreeType, fontconfig, or xml2.</p>
 <span>  file <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/tempfile.html" class="external-link">tempfile</a></span><span class="op">(</span>fileext <span class="op">=</span> <span class="st">".xml"</span><span class="op">)</span>,</span>
 <span>  width <span class="op">=</span> <span class="fl">6</span>,</span>
 <span>  height <span class="op">=</span> <span class="fl">6</span>,</span>
+<span>  units <span class="op">=</span> <span class="st">"in"</span>,</span>
 <span>  pointsize <span class="op">=</span> <span class="fl">12</span>,</span>
 <span>  fontname <span class="op">=</span> <span class="st">"Calibri"</span>,</span>
+<span>  bg <span class="op">=</span> <span class="cn">NA</span>,</span>
+<span>  symbolfamily <span class="op">=</span> <span class="st">""</span>,</span>
 <span>  underline <span class="op">=</span> <span class="cn">FALSE</span>,</span>
 <span>  strikeout <span class="op">=</span> <span class="cn">FALSE</span>,</span>
 <span>  dims <span class="op">=</span> <span class="cn">NULL</span>,</span>
@@ -71,7 +74,14 @@ For a plain string instead of a file, see [easel_xml()].</p></dd>
 
 
 <dt id="arg-width-height">width, height<a class="anchor" aria-label="anchor" href="#arg-width-height"></a></dt>
-<dd><p>Device size in inches.</p></dd>
+<dd><p>Device size, in `units`.</p></dd>
+
+
+<dt id="arg-units">units<a class="anchor" aria-label="anchor" href="#arg-units"></a></dt>
+<dd><p>Unit for `width` and `height`: `"in"` (default), `"cm"`,
+`"mm"` or `"px"`. Pixels are 96 per inch, the value spreadsheet
+applications use. Ignored when `dims` is given, since a cell region
+already fixes the size.</p></dd>
 
 
 <dt id="arg-pointsize">pointsize<a class="anchor" aria-label="anchor" href="#arg-pointsize"></a></dt>
@@ -87,6 +97,18 @@ doesn't request a specific family — i.e. whenever a plot's own
 actual font name (e.g. `par(family = "Georgia")` or
 `theme_minimal(base_family = "Georgia")`), that takes priority over
 this default.</p></dd>
+
+
+<dt id="arg-bg">bg<a class="anchor" aria-label="anchor" href="#arg-bg"></a></dt>
+<dd><p>Background colour drawn behind the plot. The default, `NA`,
+leaves the drawing transparent so the sheet shows through.</p></dd>
+
+
+<dt id="arg-symbolfamily">symbolfamily<a class="anchor" aria-label="anchor" href="#arg-symbolfamily"></a></dt>
+<dd><p>Typeface asked for on plotmath symbols. The glyphs
+are written as Unicode either way, so this only matters when
+`fontname` lacks them: `"Cambria Math"` is the usual choice on
+Windows. Empty (the default) keeps symbols in `fontname`.</p></dd>
 
 
 <dt id="arg-underline-strikeout">underline, strikeout<a class="anchor" aria-label="anchor" href="#arg-underline-strikeout"></a></dt>
@@ -151,8 +173,8 @@ layout places it visibly off; see
     <div class="sourceCode"><pre class="sourceCode r"><code><span class="r-in"><span><span class="va">f</span> <span class="op">&lt;-</span> <span class="fu">easel_dev</span><span class="op">(</span>width <span class="op">=</span> <span class="fl">6</span>, height <span class="op">=</span> <span class="fl">4</span>, fontname <span class="op">=</span> <span class="st">"Georgia"</span><span class="op">)</span></span></span>
 <span class="r-in"><span><span class="fu"><a href="https://rdrr.io/r/graphics/plot.default.html" class="external-link">plot</a></span><span class="op">(</span><span class="fl">1</span><span class="op">:</span><span class="fl">10</span>, <span class="op">(</span><span class="fl">1</span><span class="op">:</span><span class="fl">10</span><span class="op">)</span><span class="op">^</span><span class="fl">2</span>, type <span class="op">=</span> <span class="st">"b"</span><span class="op">)</span></span></span>
 <span class="r-in"><span><span class="fu"><a href="https://rdrr.io/r/grDevices/dev.html" class="external-link">dev.off</a></span><span class="op">(</span><span class="op">)</span></span></span>
-<span class="r-out co"><span class="r-pr">#&gt;</span> agg_record_19101106f230 </span>
-<span class="r-out co"><span class="r-pr">#&gt;</span>                       2 </span>
+<span class="r-out co"><span class="r-pr">#&gt;</span> agg_record_19167548964 </span>
+<span class="r-out co"><span class="r-pr">#&gt;</span>                      2 </span>
 </code></pre></div>
     </div>
   </main><aside class="col-md-3"><nav id="toc" aria-label="Table of contents"><h2>On this page</h2>
