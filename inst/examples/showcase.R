@@ -52,5 +52,5 @@ if (requireNamespace("ggplot2", quietly = TRUE)) {
 }
 
 # nolint end
-wb$save("showcase.xlsx")
+if (interactive()) wb$open() else wb$save("showcase.xlsx")
 cat("wrote showcase.xlsx\n")
