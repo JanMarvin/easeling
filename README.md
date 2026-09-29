@@ -91,13 +91,5 @@ if (interactive()) wb$open()
   `font_match()` reports which font was measured.
 - Fonts are referenced by name only, not embedded. The viewer needs the
   font installed, or it falls back silently.
-- A few packages draw part of a plot as a string and assume how wide it
-  will come out. tinyplot’s gradient legend draws each tick as the
-  literal `"-   -"`, right-aligned to the colour bar, which only lines
-  up where two hyphens and three spaces are wider than the bar. They are
-  under `pdf()`, which is what the string was written against, but not
-  under Calibri, where the dashes end up about 2.5 pt inside the bar,
-  and not under the cairo devices either. Nothing on the easeling side
-  changes that; a wider font such as DejaVu Sans avoids it.
 - Gradient fills (`grid::linearGradient()`/`radialGradient()`) are
   supported; tiling patterns and clip paths/masks are not.
