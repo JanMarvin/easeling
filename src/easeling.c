@@ -103,6 +103,25 @@ typedef struct {
 
 static void text_flush(pDevDesc dd);
 
+/* checks the byte sequence only; overlong forms and surrogates are not
+ rejected, they do not occur in strings R hands out */
+static int valid_utf8(const char *s) {
+  const unsigned char *p = (const unsigned char *) s;
+  while (*p) {
+    int n;
+    if (*p < 0x80) n = 0;
+    else if ((*p & 0xE0) == 0xC0) n = 1;
+    else if ((*p & 0xF0) == 0xE0) n = 2;
+    else if ((*p & 0xF8) == 0xF0) n = 3;
+    else return 0;
+    p++;
+    for (int i = 0; i < n; i++, p++) {
+      if ((*p & 0xC0) != 0x80) return 0;
+    }
+  }
+  return 1;
+}
+
 static int is_generic_family(const char *f) {
   return f[0] == '\0' || strcmp(f, "sans") == 0 || strcmp(f, "serif") == 0 ||
     strcmp(f, "mono") == 0 || strcmp(f, "symbol") == 0;
@@ -1846,9 +1865,16 @@ static void Xdr_TextImpl(double x, double y, const char *str, double rot,
   /* fontface 5 is the symbol face the engine uses for plotmath fragments;
    the glyphs arrive as UTF-8, so this only decides which typeface is
    asked for, and Calibri does not cover every one of them */
+  /* the XML is UTF-8. Base graphics passes the family in the native
+   encoding, grid and glyph fonts pass the bytes of the R string as they
+   are: keep valid UTF-8, translate the rest from the native encoding and,
+   in a UTF-8 session where that changes nothing, from latin1 */
+  const char *family = gc->fontfamily;
+  if (!valid_utf8(family)) family = Rf_reEnc(gc->fontfamily, CE_NATIVE, CE_UTF8, 1);
+  if (!valid_utf8(family)) family = Rf_reEnc(gc->fontfamily, CE_LATIN1, CE_UTF8, 1);
   const char *font = (gc->fontface == 5 && d->symbolfamily[0] != '\0')
     ? d->symbolfamily
-    : (is_generic_family(gc->fontfamily) ? d->fontname : gc->fontfamily);
+    : (is_generic_family(family) ? d->fontname : family);
   double fs = gc->cex * gc->ps;
   double w = Xdr_StrWidth(str, gc, dd);
 
@@ -2128,17 +2154,17 @@ SEXP easeling_(SEXP path_, SEXP width_, SEXP height_, SEXP pointsize_,
                SEXP fontname_, SEXP underline_, SEXP strikeout_,
                SEXP text_voff_, SEXP result_env_, SEXP metrics_,
                SEXP glyph_fun_, SEXP bg_, SEXP symbolfamily_) {
-  const char *path = (path_ == R_NilValue) ? NULL : CHAR(STRING_ELT(path_, 0));
+  const char *path = (path_ == R_NilValue) ? NULL : Rf_translateChar(STRING_ELT(path_, 0));
   if (path == NULL && TYPEOF(result_env_) != ENVSXP)
     Rf_error("internal: memory output needs an environment");
   double width  = REAL(width_)[0];
   double height = REAL(height_)[0];
   double ps     = REAL(pointsize_)[0];
-  const char *fontname = CHAR(STRING_ELT(fontname_, 0));
+  const char *fontname = Rf_translateCharUTF8(STRING_ELT(fontname_, 0));
   Rboolean underline = (Rboolean) LOGICAL(underline_)[0];
   Rboolean strikeout = (Rboolean) LOGICAL(strikeout_)[0];
   const char *bg = CHAR(STRING_ELT(bg_, 0));
-  const char *symbolfamily = CHAR(STRING_ELT(symbolfamily_, 0));
+  const char *symbolfamily = Rf_translateCharUTF8(STRING_ELT(symbolfamily_, 0));
 
   R_GE_checkVersionOrDie(R_GE_version);
   R_CheckDeviceAvailable();
