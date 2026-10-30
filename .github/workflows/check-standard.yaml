@@ -21,7 +21,7 @@ jobs:
         config:
           - {os: macos-latest,   r: 'release'}
           - {os: windows-latest, r: 'release'}
-          - {os: windows-latest, r: '4.1'}
+          - {os: windows-latest, r: '4.1', deps: '"hard"'}
           - {os: ubuntu-latest,  r: 'devel', http-user-agent: 'release'}
           - {os: ubuntu-latest,  r: 'release'}
           - {os: ubuntu-latest,  r: 'oldrel-1'}
@@ -29,6 +29,7 @@ jobs:
     env:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
       R_KEEP_PKG_SOURCE: yes
+      _R_CHECK_FORCE_SUGGESTS_: false
 
     steps:
       - uses: actions/checkout@v6
@@ -44,6 +45,7 @@ jobs:
         with:
           extra-packages: any::rcmdcheck
           needs: check
+          dependencies: ${{ matrix.config.deps || '"all"' }}
 
       - uses: r-lib/actions/check-r-package@v2
         with:

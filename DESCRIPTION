@@ -18,9 +18,17 @@ License: MIT + file LICENSE
 Encoding: UTF-8
 Depends: R (>= 3.6.0)
 NeedsCompilation: yes
+Imports:
+  grDevices,
+  graphics,
+  grid,
+  utils
 Config/roxygen2/version: 8.1.1
 Suggests: 
+  encharter,
+  jpeg,
   openxlsx2,
+  png,
   systemfonts,
   testthat (>= 3.0.0)
 Config/testthat/edition: 3
