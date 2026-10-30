@@ -2103,15 +2103,14 @@ static void Xdr_Glyph(int n, int *glyphs, double *x, double *y,
   }
   SEXP ids = PROTECT(Rf_allocVector(INTSXP, n));
   memcpy(INTEGER(ids), glyphs, (size_t) n * sizeof(int));
-  SEXP call = PROTECT(Rf_lang4(d->glyph_fun,
-                               Rf_mkString(R_GE_glyphFontFile(font)),
-                               Rf_ScalarInteger(R_GE_glyphFontIndex(font)),
-                               ids));
+  SEXP file = PROTECT(Rf_mkString(R_GE_glyphFontFile(font)));
+  SEXP index = PROTECT(Rf_ScalarInteger(R_GE_glyphFontIndex(font)));
+  SEXP call = PROTECT(Rf_lang4(d->glyph_fun, file, index, ids));
   int err = 0;
   SEXP chars = R_tryEvalSilent(call, R_GlobalEnv, &err);
   if (err || chars == NULL || TYPEOF(chars) != STRSXP ||
       Rf_xlength(chars) != n) {
-    UNPROTECT(2);
+    UNPROTECT(4);
     return;
   }
   PROTECT(chars);
@@ -2140,7 +2139,7 @@ static void Xdr_Glyph(int n, int *glyphs, double *x, double *y,
                "cmap and were dropped", unmapped);
     d->glyph_warned_unmapped = 1;
   }
-  UNPROTECT(3);
+  UNPROTECT(5);
 }
 #endif
 
