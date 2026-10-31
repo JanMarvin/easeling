@@ -134,6 +134,6 @@ The output file path, invisibly.
 f <- easel_dev(width = 6, height = 4, fontname = "Georgia")
 plot(1:10, (1:10)^2, type = "b")
 dev.off()
-#> agg_record_190a130ffed 
-#>                      2 
+#> agg_record_190f4f659e90 
+#>                       2 
 ```
