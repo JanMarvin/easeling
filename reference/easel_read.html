@@ -84,7 +84,12 @@ as.</p>
 
 <dl><dt id="arg-file">file<a class="anchor" aria-label="anchor" href="#arg-file"></a></dt>
 <dd><p>Path of an XML file written by [easel_dev()], of a drawing XML
-file, or of an `.xlsx` workbook.</p></dd>
+file, or of an `.xlsx`, `.xlsm`, `.xlsb` or `.xls` workbook, or an
+openxlsx2 `wbWorkbook` object. Binary workbooks (`.xlsb`, `.xls`) are
+converted with openxlsx2 (&gt; 1.30) when it is installed. Without it,
+`.xlsb` files are read directly, but comments and slicers are not
+available and shapes without a size are sized from the sheet's records;
+`.xls` files cannot be read.</p></dd>
 
 
 <dt id="arg-sheet">sheet<a class="anchor" aria-label="anchor" href="#arg-sheet"></a></dt>
@@ -179,7 +184,7 @@ Arcs, underlines and strike-through are ignored.</p>
     <div class="sourceCode"><pre class="sourceCode r"><code><span class="r-in"><span><span class="va">f</span> <span class="op">&lt;-</span> <span class="fu"><a href="easel_dev.html">easel_dev</a></span><span class="op">(</span>width <span class="op">=</span> <span class="fl">4</span>, height <span class="op">=</span> <span class="fl">3</span><span class="op">)</span></span></span>
 <span class="r-in"><span><span class="fu"><a href="https://rdrr.io/r/graphics/plot.default.html" class="external-link">plot</a></span><span class="op">(</span><span class="fl">1</span><span class="op">:</span><span class="fl">10</span>, main <span class="op">=</span> <span class="st">"round trip"</span><span class="op">)</span></span></span>
 <span class="r-in"><span><span class="fu"><a href="https://rdrr.io/r/grDevices/dev.html" class="external-link">dev.off</a></span><span class="op">(</span><span class="op">)</span></span></span>
-<span class="r-out co"><span class="r-pr">#&gt;</span> agg_record_188810baefb8 </span>
+<span class="r-out co"><span class="r-pr">#&gt;</span> agg_record_190a42e01592 </span>
 <span class="r-out co"><span class="r-pr">#&gt;</span>                       2 </span>
 <span class="r-in"><span></span></span>
 <span class="r-in"><span><span class="va">d</span> <span class="op">&lt;-</span> <span class="fu">easel_read</span><span class="op">(</span><span class="va">f</span><span class="op">)</span></span></span>

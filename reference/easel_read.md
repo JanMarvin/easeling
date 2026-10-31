@@ -35,7 +35,12 @@ plot(x, ncol = NULL, ...)
 - file:
 
   Path of an XML file written by \[easel_dev()\], of a drawing XML file,
-  or of an \`.xlsx\` workbook.
+  or of an \`.xlsx\`, \`.xlsm\`, \`.xlsb\` or \`.xls\` workbook, or an
+  openxlsx2 \`wbWorkbook\` object. Binary workbooks (\`.xlsb\`,
+  \`.xls\`) are converted with openxlsx2 (\> 1.30) when it is installed.
+  Without it, \`.xlsb\` files are read directly, but comments and
+  slicers are not available and shapes without a size are sized from the
+  sheet's records; \`.xls\` files cannot be read.
 
 - sheet:
 
@@ -128,7 +133,7 @@ strike-through are ignored.
 f <- easel_dev(width = 4, height = 3)
 plot(1:10, main = "round trip")
 dev.off()
-#> agg_record_188810baefb8 
+#> agg_record_190a42e01592 
 #>                       2 
 
 d <- easel_read(f)
