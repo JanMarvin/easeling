@@ -30,7 +30,12 @@
 #' Arcs, underlines and strike-through are ignored.
 #'
 #' @param file Path of an XML file written by [easel_dev()], of a drawing XML
-#'   file, or of an `.xlsx` workbook.
+#'   file, or of an `.xlsx`, `.xlsm`, `.xlsb` or `.xls` workbook, or an
+#'   openxlsx2 `wbWorkbook` object. Binary workbooks (`.xlsb`, `.xls`) are
+#'   converted with openxlsx2 (> 1.30) when it is installed. Without it,
+#'   `.xlsb` files are read directly, but comments and slicers are not
+#'   available and shapes without a size are sized from the sheet's records;
+#'   `.xls` files cannot be read.
 #' @param sheet For a workbook, the sheet (name or position) holding the
 #'   drawing.
 #' @param n Which drawing on the sheet to read, in the order of the
@@ -73,8 +78,26 @@
 #' @export
 easel_read <- function(file, sheet = 1L, n = 1L, what = c("drawing", "comments"), all = FALSE) {
   what <- match.arg(what)
+  if (inherits(file, "wbWorkbook")) {
+    wb_file <- tempfile(fileext = ".xlsx")
+    file$save(wb_file)
+    file <- wb_file
+  }
+  if (is.character(file) && grepl("\\.xlsb?$", file, ignore.case = TRUE)) {
+    wb_loaded <- NULL
+    if (requireNamespace("openxlsx2", quietly = TRUE) && utils::packageVersion("openxlsx2") > "1.30") {
+      wb_loaded <- tryCatch(openxlsx2::wb_load(file), error = function(e) NULL)
+    }
+    if (!is.null(wb_loaded)) {
+      wb_file <- tempfile(fileext = ".xlsx")
+      wb_loaded$save(wb_file)
+      file <- wb_file
+    } else if (grepl("\\.xls$", file, ignore.case = TRUE)) {
+      stop("could not read the .xls file (reading .xls needs openxlsx2 > 1.30)", call. = FALSE)
+    }
+  }
   if (isTRUE(all)) {
-    book <- grepl("\\.xls[xm]$", file, ignore.case = TRUE)
+    book <- grepl("\\.xls[xmb]$", file, ignore.case = TRUE)
     out <- list()
     labels <- character()
     done <- FALSE
@@ -100,13 +123,14 @@ easel_read <- function(file, sheet = 1L, n = 1L, what = c("drawing", "comments")
   }
   theme <- character()
   file_path <- NULL
-  sheet_xml <- function() NULL
+  sheet_xml <- function(max_row) NULL
   target_of <- function(rid) NULL
   media_of <- function(rid) NULL
   chart_row <- function(path) NA_integer_
   slicer_of <- function(name) NULL
   diagram_of <- function(rid) NULL
-  if (grepl("\\.xls[xm]$", file, ignore.case = TRUE)) {
+  if (grepl("\\.xls[xmb]$", file, ignore.case = TRUE)) {
+    xlsb <- grepl("\\.xlsb$", file, ignore.case = TRUE)
     entries <- unzip(file, list = TRUE)$Name
     file_path <- normalizePath(file)
     td <- tempfile()
@@ -125,17 +149,51 @@ easel_read <- function(file, sheet = 1L, n = 1L, what = c("drawing", "comments")
       paste(out, collapse = "/")
     }
 
-    wb <- ooxml_parse(rd("xl/workbook.xml"))
-    sheets <- which(wb$name == "sheet")
-    if (is.character(sheet)) {
-      pick <- sheets[vapply(sheets, function(i) identical(ooxml_attr(wb, i, "name"), sheet), NA)]
+    wb_part <- if (xlsb) "xl/workbook.bin" else "xl/workbook.xml"
+    snames <- srids <- character()
+    if (xlsb) {
+      bin_file <- unzip(file, files = wb_part, exdir = td)
+      bin <- readBin(bin_file, "raw", n = file.size(bin_file))
+      pos <- 1L
+      while (pos <= length(bin)) {
+        id <- as.integer(bin[pos])
+        pos <- pos + 1L
+        if (id >= 128L) {
+          id <- (id - 128L) + (as.integer(bin[pos]) %% 128L) * 128L
+          pos <- pos + 1L
+        }
+        len <- 0L
+        mul <- 1L
+        for (k in 1:4) {
+          b <- as.integer(bin[pos])
+          pos <- pos + 1L
+          len <- len + (b %% 128L) * mul
+          mul <- mul * 128L
+          if (b < 128L) break
+        }
+        if (id == 156L) {
+          rec <- bin[pos + seq_len(len) - 1L]
+          nrid <- readBin(rec[9:12], "integer", size = 4L)
+          rid_end <- 12L + 2L * max(nrid, 0L)
+          srids <- c(srids, if (nrid > 0L) iconv(list(rec[13:rid_end]), "UTF-16LE", "UTF-8") else "")
+          nnm <- readBin(rec[rid_end + 1:4], "integer", size = 4L)
+          snames <- c(snames, iconv(list(rec[rid_end + 4L + seq_len(2L * nnm)]), "UTF-16LE", "UTF-8"))
+        }
+        pos <- pos + len
+      }
     } else {
-      pick <- sheets[sheet]
+      wb <- ooxml_parse(rd(wb_part))
+      sheets <- which(wb$name == "sheet")
+      snames <- vapply(sheets, function(i) ooxml_attr(wb, i, "name"), "")
+      srids <- vapply(sheets, function(i) ooxml_attr(wb, i, "id"), "")
     }
-    if (length(pick) != 1L || is.na(pick)) stop("sheet not found in ", file, call. = FALSE)
-    rid <- ooxml_attr(wb, pick, "id")
+    pick <- if (is.character(sheet)) match(sheet, snames) else sheet
+    if (length(pick) != 1L || is.na(pick) || pick < 1L || pick > length(snames)) {
+      stop("sheet not found in ", file, call. = FALSE)
+    }
+    rid <- srids[pick]
 
-    rels <- ooxml_parse(rd("xl/_rels/workbook.xml.rels"))
+    rels <- ooxml_parse(rd(paste0("xl/_rels/", basename(wb_part), ".rels")))
     rel <- which(rels$name == "Relationship")
     rel <- rel[vapply(rel, function(i) identical(ooxml_attr(rels, i, "Id"), rid), NA)]
     if (length(rel) == 0L) stop("cannot resolve the sheet in ", file, call. = FALSE)
@@ -152,6 +210,7 @@ easel_read <- function(file, sheet = 1L, n = 1L, what = c("drawing", "comments")
     }
 
     if (what == "comments") {
+      if (xlsb) stop("comments cannot be read from a binary workbook (xlsb)", call. = FALSE)
       crel_path <- paste0(dirname(sheet_path), "/_rels/", basename(sheet_path), ".rels")
       if (!crel_path %in% entries) stop("the sheet has no comments", call. = FALSE)
       crels <- ooxml_parse(rd(crel_path))
@@ -316,7 +375,57 @@ easel_read <- function(file, sheet = 1L, n = 1L, what = c("drawing", "comments")
     drawing_path <- resolve(dirname(sheet_path), ooxml_attr(srels, rel[1L], "Target"))
     if (!drawing_path %in% entries) stop("the drawing part is missing from the workbook", call. = FALSE)
     xml <- rd(drawing_path)
-    sheet_xml <- function() rd(sheet_path)
+    if (!xlsb) sheet_xml <- function(max_row) rd(sheet_path)
+    if (xlsb) {
+      sheet_xml <- function(max_row) {
+        sheet_file <- unzip(file, files = sheet_path, exdir = td)
+        bs <- readBin(sheet_file, "raw", n = file.size(sheet_file))
+        fmt_xml <- ""
+        cols_xml <- character()
+        rows_xml <- character()
+        pos <- 1L
+        while (pos <= length(bs)) {
+          id <- as.integer(bs[pos])
+          pos <- pos + 1L
+          if (id >= 128L) {
+            id <- (id - 128L) + (as.integer(bs[pos]) %% 128L) * 128L
+            pos <- pos + 1L
+          }
+          len <- 0L
+          mul <- 1L
+          for (k in 1:4) {
+            b <- as.integer(bs[pos])
+            pos <- pos + 1L
+            len <- len + (b %% 128L) * mul
+            mul <- mul * 128L
+            if (b < 128L) break
+          }
+          rec <- bs[pos + seq_len(len) - 1L]
+          if (id == 485L) {
+            dxg <- readBin(rec[1:4], "integer", size = 4L)
+            base_w <- readBin(rec[5:6], "integer", size = 2L, signed = FALSE)
+            row_h <- readBin(rec[7:8], "integer", size = 2L, signed = FALSE)
+            fmt_xml <- paste0(
+              "<sheetFormatPr baseColWidth=\"", base_w, "\"",
+              if (dxg > 0L) paste0(" defaultColWidth=\"", dxg / 256, "\""),
+              " defaultRowHeight=\"", row_h / 20, "\"/>"
+            )
+          } else if (id == 60L) {
+            first <- readBin(rec[1:4], "integer", size = 4L)
+            last <- readBin(rec[5:8], "integer", size = 4L)
+            dx <- readBin(rec[9:12], "integer", size = 4L)
+            cols_xml <- c(cols_xml, paste0("<col min=\"", first + 1L, "\" max=\"", last + 1L, "\" width=\"", dx / 256, "\"/>"))
+          } else if (id == 0L) {
+            rw <- readBin(rec[1:4], "integer", size = 4L)
+            if (rw > max_row) break
+            ht <- readBin(rec[9:10], "integer", size = 2L, signed = FALSE)
+            rows_xml <- c(rows_xml, paste0("<row r=\"", rw + 1L, "\" ht=\"", ht / 20, "\"/>"))
+          }
+          pos <- pos + len
+        }
+        paste0(fmt_xml, paste(cols_xml, collapse = ""), paste(rows_xml, collapse = ""))
+      }
+    }
     drel_path <- paste0(dirname(drawing_path), "/_rels/", basename(drawing_path), ".rels")
     drels <- if (drel_path %in% entries) ooxml_parse(rd(drel_path)) else NULL
     target_of <- function(rid) {
@@ -430,8 +539,7 @@ easel_read <- function(file, sheet = 1L, n = 1L, what = c("drawing", "comments")
     }
     from <- ooxml_kids(dom, anchor, "from")[1L]
     to <- ooxml_kids(dom, anchor, "to")[1L]
-    sx_ <- sheet_xml()
-    if (is.na(from) || is.na(to) || is.null(sx_)) return(NULL)
+    if (is.na(from) || is.na(to)) return(NULL)
     pos <- function(node) {
       as.numeric(vapply(c("col", "colOff", "row", "rowOff"), function(nm) {
         dom$text[ooxml_kids(dom, node, nm)[1L]]
@@ -440,6 +548,8 @@ easel_read <- function(file, sheet = 1L, n = 1L, what = c("drawing", "comments")
     f <- pos(from)
     t <- pos(to)
     if (anyNA(c(f, t))) return(NULL)
+    sx_ <- sheet_xml(max(f[3L], t[3L]))
+    if (is.null(sx_)) return(NULL)
 
     fmt <- regmatches(sx_, regexpr("<sheetFormatPr[^>]*>", sx_))
     dcw <- as.numeric(sub("^.* defaultColWidth=\"([^\"]*)\".*$", "\\1", fmt[grepl("defaultColWidth", fmt)]))

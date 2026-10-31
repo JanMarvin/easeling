@@ -181,14 +181,14 @@ test_that("equation elements are translated and plotted", {
   expect_no_error(draw_it(d))
 })
 
-mkxlsx <- function(parts) {
+mkxlsx <- function(parts, ext = ".xlsx") {
   d <- tempfile()
   for (nm in names(parts)) {
     p <- file.path(d, nm)
     dir.create(dirname(p), recursive = TRUE, showWarnings = FALSE)
-    writeLines(parts[[nm]], p)
+    if (is.raw(parts[[nm]])) writeBin(parts[[nm]], p) else writeLines(parts[[nm]], p)
   }
-  xl <- tempfile(fileext = ".xlsx")
+  xl <- tempfile(fileext = ext)
   old <- setwd(d)
   on.exit(setwd(old))
   utils::zip(xl, list.files(".", recursive = TRUE), flags = "-r9Xq")
@@ -630,4 +630,99 @@ test_that("diagrams are drawn from their stored shapes", {
   xl2 <- mkxlsx(drawing_parts(oneanchor(paste0(frame("rId2"), frame("rId9"))), drels = dr, extra = extra))
   on.exit(unlink(xl2), add = TRUE)
   expect_error(easel_read(xl2), "no shapes")
+})
+
+brt <- function(id, payload = raw()) {
+  head <- if (id < 128L) as.raw(id) else as.raw(c(128L + id %% 128L, id %/% 128L))
+  len <- length(payload)
+  size <- if (len < 128L) as.raw(len) else as.raw(c(128L + len %% 128L, len %/% 128L))
+  c(head, size, payload)
+}
+
+u32 <- function(x) writeBin(as.integer(x), raw(), size = 4L)
+
+u16 <- function(x) writeBin(as.integer(x), raw(), size = 2L)
+
+wide <- function(x) c(u32(nchar(x)), iconv(x, "UTF-8", "UTF-16LE", toRaw = TRUE)[[1L]])
+
+test_that("binary workbooks are read, including the sheet geometry", {
+  skip_if(Sys.which("zip") == "", "no zip program")
+  bundle <- function(name, rid) {
+    brt(156L, c(u32(0L), u32(1L), if (is.na(rid)) u32(-1L) else wide(rid), wide(name)))
+  }
+  wbbin <- c(brt(1L, as.raw(rep(1L, 200L))), bundle("First", "rId1"), bundle("Second", NA_character_))
+  sheetbin <- c(
+    brt(485L, c(u32(0L), u16(8L), u16(300L), u16(0L))),
+    brt(60L, c(u32(0L), u32(1L), u32(2560L), u32(0L), u16(0L))),
+    brt(0L, c(u32(0L), u32(0L), u16(400L), u16(0L))),
+    brt(0L, c(u32(5L), u32(0L), u16(400L), u16(0L)))
+  )
+  plain <- paste0(
+    "<xdr:sp><xdr:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/></a:xfrm><a:prstGeom prst=\"rect\"/>",
+    "<a:solidFill><a:srgbClr val=\"FF0000\"/></a:solidFill></xdr:spPr></xdr:sp>"
+  )
+  head <- paste0(
+    "<xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>",
+    "<xdr:to><xdr:col>2</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>"
+  )
+  parts <- list(
+    "xl/workbook.bin" = wbbin,
+    "xl/_rels/workbook.bin.rels" = rels_xml(rel1("rId1", "worksheet", "worksheets/sheet1.bin")),
+    "xl/worksheets/sheet1.bin" = sheetbin,
+    "xl/worksheets/_rels/sheet1.bin.rels" = rels_xml(rel1("rId1", "drawing", "../drawings/drawing1.xml")),
+    "xl/drawings/drawing1.xml" = wsdr(plain, head = head)
+  )
+  xl <- mkxlsx(parts, ".xlsb")
+  on.exit(unlink(xl))
+  d <- easel_read(xl)
+  expect_equal(c(d$width, d$height), c(2 * 70 * 9525, 20 * 12700 + 15 * 12700 * 2 - 15 * 12700) / 12700)
+  expect_equal(c(easel_read(xl, sheet = "First")$width), d$width)
+  expect_error(easel_read(xl, sheet = "Second"), "cannot resolve")
+  expect_error(easel_read(xl, sheet = "Third"), "sheet not found")
+  expect_error(easel_read(xl, sheet = 0L), "sheet not found")
+  expect_error(easel_read(xl, what = "comments"), "binary workbook")
+
+  parts[["xl/worksheets/sheet1.bin"]] <- c(brt(485L, c(u32(2560L), u16(8L), u16(300L), u16(0L))), sheetbin[-seq_len(13L)])
+  xl2 <- mkxlsx(parts, ".xlsb")
+  on.exit(unlink(xl2), add = TRUE)
+  expect_gt(easel_read(xl2)$width, 0)
+})
+
+test_that("a workbook object is accepted", {
+  skip_if_not_installed("openxlsx2")
+  skip_if_not_installed("png")
+  img <- tempfile(fileext = ".png")
+  png::writePNG(array(runif(10 * 10 * 3), c(10, 10, 3)), img)
+  on.exit(unlink(img))
+  wb <- openxlsx2::wb_workbook()$add_worksheet()$add_image(dims = "B2", file = img, width = 3, height = 2, units = "cm")
+  expect_equal(easel_read(wb)$shapes[[1L]]$type, "image")
+  expect_length(easel_read(wb, all = TRUE), 1L)
+})
+
+test_that("a drawing file alone cannot size a shape from its anchor", {
+  plain <- paste0(
+    "<xdr:sp><xdr:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/></a:xfrm><a:prstGeom prst=\"rect\"/>",
+    "<a:solidFill><a:srgbClr val=\"FF0000\"/></a:solidFill></xdr:spPr></xdr:sp>"
+  )
+  expect_error(read_xml(wsdr(plain)), "no shapes")
+})
+
+test_that("binary workbooks go through openxlsx2 when it can read them", {
+  skip_if_not_installed("openxlsx2")
+  skip_if_not_installed("png")
+  img <- tempfile(fileext = ".png")
+  png::writePNG(array(runif(10 * 10 * 3), c(10, 10, 3)), img)
+  on.exit(unlink(img))
+  wb <- openxlsx2::wb_workbook()$add_worksheet()$add_image(dims = "B2", file = img, width = 3, height = 2, units = "cm")
+  testthat::local_mocked_bindings(wb_load = function(...) wb, .package = "openxlsx2")
+  skip_if(utils::packageVersion("openxlsx2") <= "1.30")
+  expect_equal(easel_read("any.xlsb")$shapes[[1L]]$type, "image")
+  expect_equal(easel_read("any.xls")$shapes[[1L]]$type, "image")
+})
+
+test_that("an unreadable xls file is reported", {
+  f <- tempfile(fileext = ".xls")
+  writeLines("junk", f)
+  on.exit(unlink(f))
+  expect_error(easel_read(f), "xls")
 })
