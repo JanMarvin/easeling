@@ -128,7 +128,7 @@ strike-through are ignored.
 f <- easel_dev(width = 4, height = 3)
 plot(1:10, main = "round trip")
 dev.off()
-#> agg_record_19ce437faaa9 
+#> agg_record_188810baefb8 
 #>                       2 
 
 d <- easel_read(f)
