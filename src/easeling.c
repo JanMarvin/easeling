@@ -177,6 +177,9 @@ static void xfrm_rot(xdrDesc *d, double x1, double y1, double x2, double y2,
   double min_y = y1 < y2 ? y1 : y2;
   double cx = fabs(x2 - x1) * PT_TO_EMU;
   double cy = fabs(y2 - y1) * PT_TO_EMU;
+  /* very long text gives boxes wider than an extent can be (2147483647 EMU) */
+  if (cx > 2147483647.0) cx = 2147483647.0;
+  if (cy > 2147483647.0) cy = 2147483647.0;
 
   if (rot60k != 0)
     mb_printf(&d->out, "<a:xfrm rot=\"%d\">", rot60k);
@@ -319,6 +322,8 @@ static void line_props(xdrDesc *d, int col, double lwd, int lty, int lend, int l
     return;
   }
   double w_emu = (lwd > 0 ? lwd : 1.0) * 0.75 * PT_TO_EMU;
+  /* ST_LineWidth ends at 20116800 EMU (1584 pt) */
+  if (w_emu > 20116800.0) w_emu = 20116800.0;
 
   const char *cap = "rnd";
   if      (lend == GE_BUTT_CAP)   cap = "flat";
@@ -1365,9 +1370,18 @@ static void dev_char_v(const xdrDesc *d, int c, double *asc, double *desc) {
   char_vmetrics(c, asc, desc);
 }
 
+/* text size in pt, within the range of a:rPr sz (1 to 4000 pt); the
+   metrics use it too, so boxes fit the text that is written */
+static double font_size_pt(const pGEcontext gc) {
+  double sz = gc->cex * gc->ps;
+  if (!(sz >= 1.0)) return 1.0;
+  if (sz > 4000.0) return 4000.0;
+  return sz;
+}
+
 static double Xdr_StrWidth(const char *str, const pGEcontext gc, pDevDesc dd) {
   const xdrDesc *d = (const xdrDesc *) dd->deviceSpecific;
-  double sz = gc->cex * gc->ps;
+  double sz = font_size_pt(gc);
   double total = 0.0;
   for (const unsigned char *p = (const unsigned char *) str; *p != '\0'; p++) {
     /* Skip UTF-8 continuation bytes (10xxxxxx); treat each lead byte as
@@ -1405,7 +1419,7 @@ static void char_vmetrics(int c, double *asc, double *desc) {
 
 static void Xdr_MetricInfo(int c, const pGEcontext gc, double *ascent,
                            double *descent, double *width, pDevDesc dd) {
-  double sz = gc->cex * gc->ps;
+  double sz = font_size_pt(gc);
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   if (c < 0) c = -c; /* negative c is a Unicode code point */
   /* c == 0 asks for whole-font metrics and lands on the generous default */
@@ -1861,6 +1875,8 @@ static void Xdr_TextImpl(double x, double y, const char *str, double rot,
   xdrDesc *d = (xdrDesc *) dd->deviceSpecific;
   if (d->capturing) return;
   if (str == NULL || str[0] == '\0') return;
+  /* grid places text at NaN for an infinite font size, there is nothing to draw */
+  if (!R_FINITE(x) || !R_FINITE(y) || !R_FINITE(rot)) return;
 
   /* fontface 5 is the symbol face the engine uses for plotmath fragments;
    the glyphs arrive as UTF-8, so this only decides which typeface is
@@ -1875,7 +1891,7 @@ static void Xdr_TextImpl(double x, double y, const char *str, double rot,
   const char *font = (gc->fontface == 5 && d->symbolfamily[0] != '\0')
     ? d->symbolfamily
     : (is_generic_family(family) ? d->fontname : family);
-  double fs = gc->cex * gc->ps;
+  double fs = font_size_pt(gc);
   double w = Xdr_StrWidth(str, gc, dd);
 
   int gap = 0;
