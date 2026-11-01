@@ -1763,3 +1763,41 @@ test_that("an opaque cell still bleeds into an opaque neighbour", {
   expect_equal(unname(v[["width"]]), unname(v[["half"]]) * 1.5,
                tolerance = 1e-4)
 })
+
+# values are kept within the ranges of DrawingML ----------------------------
+
+test_that("font sizes, line widths and extents stay within DrawingML ranges", {
+  f <- easel_dev(width = 4, height = 3)
+  plot.new()
+  text(0.5, 0.5, "huge", cex = 1e10)
+  text(0.5, 0.2, "tiny", cex = 0.001)
+  text(0.5, 0.8, strrep("x", 32768))
+  lines(c(0.1, 0.9), c(0.1, 0.9), lwd = 1e10)
+  dev.off()
+  txt <- read_xml_text(f)
+  sz <- as.numeric(regmatches(txt, gregexpr("(?<= sz=\")[0-9]+", txt, perl = TRUE))[[1]])
+  expect_true(all(sz >= 100 & sz <= 400000))
+  expect_true(400000 %in% sz)
+  expect_true(100 %in% sz)
+  w <- as.numeric(regmatches(txt, gregexpr("(?<=<a:ln w=\")[0-9]+", txt, perl = TRUE))[[1]])
+  expect_equal(max(w), 20116800)
+  ext <- as.numeric(regmatches(txt, gregexpr("(?<= c[xy]=\")[0-9]+", txt, perl = TRUE))[[1]])
+  expect_true(all(ext <= 2147483647))
+  expect_true(2147483647 %in% ext)
+})
+
+test_that("text at a position that is not finite is skipped", {
+  f <- easel_dev(width = 4, height = 3)
+  grid::grid.newpage()
+  grid::grid.text("inf", gp = grid::gpar(fontsize = Inf))
+  grid::grid.text("ok")
+  dev.off()
+  txt <- read_xml_text(f)
+  expect_no_match(txt, "nan")
+  expect_match(txt, "<a:t>ok</a:t>")
+})
+
+test_that("the device size is limited to what a drawing can hold", {
+  expect_error(easel_dev(width = 2349), "2348")
+  expect_error(easel_dev(height = 2349), "2348")
+})

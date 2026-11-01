@@ -108,6 +108,9 @@ easel_dev_impl <- function(file, env, width = 6, height = 6,
   pointsize <- as.double(pointsize[1L])
   if (!is.finite(width) || width <= 0 || !is.finite(height) || height <= 0)
     stop("'width' and 'height' must be positive")
+  # drawing extents are limited to 2147483647 EMU, 914400 EMU per inch
+  if (width > 2348 || height > 2348)
+    stop("'width' and 'height' must be at most 2348 inches")
   if (!is.finite(pointsize) || pointsize <= 0)
     stop("'pointsize' must be positive")
   fontname <- as.character(fontname[1L])
