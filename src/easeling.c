@@ -247,6 +247,9 @@ static void fill_props_gc(xdrDesc *d, const pGEcontext gc,
       double ang_deg = atan2(y2 - y1, x2 - x1) * 180.0 / M_PI;
       if (ang_deg < 0) ang_deg += 360.0;
       int ang_60000 = (int) round(ang_deg * 60000.0);
+      /* an angle just below 360 degrees rounds to a full turn, which
+       ST_PositiveFixedAngle does not take */
+      if (ang_60000 >= 21600000) ang_60000 -= 21600000;
       mb_printf(&d->out, "<a:gradFill>");
       emit_gradient_stops_linear(d, gc->patternFill);
       mb_printf(&d->out, "<a:lin ang=\"%d\" scaled=\"0\"/></a:gradFill>", ang_60000);
@@ -1833,7 +1836,11 @@ static void text_flush(pDevDesc dd) {
      same place, but a shape carrying bodyPr rot keeps an upright frame,
      so selecting a rotated label in a spreadsheet application shows
      handles that do not follow the glyphs. */
-    int ooxml_rot = (fabs(rot) > 1e-4) ? (int) (-rot * 60000.0) : 0;
+    /* R turns text counter-clockwise, DrawingML clockwise in 60000ths of a
+     degree. Keep the angle within one turn, the cast below is only defined
+     for values an int can hold */
+    double turn = R_FINITE(rot) ? fmod(-rot, 360.0) : 0.0;
+    int ooxml_rot = (fabs(turn) > 1e-4) ? (int) (turn * 60000.0) : 0;
     sp_open(d, "");
     mb_printf(&d->out, "<xdr:spPr>");
     xfrm_rot(d, bx0, by0, bx1, by1, ooxml_rot);

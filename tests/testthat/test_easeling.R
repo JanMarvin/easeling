@@ -1801,3 +1801,25 @@ test_that("the device size is limited to what a drawing can hold", {
   expect_error(easel_dev(width = 2349), "2348")
   expect_error(easel_dev(height = 2349), "2348")
 })
+
+test_that("text rotation stays within one turn", {
+  f <- blank_dev()
+  text(grconvertX(0.5, "npc", "user"), grconvertY(0.5, "npc", "user"), "a", srt = 450)
+  text(grconvertX(0.5, "npc", "user"), grconvertY(0.5, "npc", "user"), "b", srt = 1e12)
+  text(grconvertX(0.5, "npc", "user"), grconvertY(0.5, "npc", "user"), "c", srt = 720)
+  dev.off()
+  xml <- read_xml_text(f)
+  rot <- as.numeric(regmatches(xml, gregexpr("(?<=xfrm rot=\")-?[0-9]+", xml, perl = TRUE))[[1]])
+  expect_true(all(abs(rot) < 21600000))
+  expect_equal(count_matches(f, '<a:xfrm rot="-5400000">'), 1L)
+})
+
+test_that("a linear gradient just below a full turn keeps its angle in range", {
+  f <- blank_dev()
+  grid::grid.rect(gp = grid::gpar(fill = grid::linearGradient(c("red", "blue"), x1 = 0, y1 = 1e-9, x2 = 1, y2 = 0)))
+  grid::grid.rect(gp = grid::gpar(fill = grid::linearGradient(c("red", "blue"), x1 = 0, y1 = 0, x2 = 1, y2 = 1e-9)))
+  dev.off()
+  xml <- read_xml_text(f)
+  ang <- as.numeric(regmatches(xml, gregexpr("(?<=lin ang=\")[0-9]+", xml, perl = TRUE))[[1]])
+  expect_true(all(ang >= 0 & ang < 21600000))
+})
